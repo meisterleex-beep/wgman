@@ -1,6 +1,4 @@
 #!/bin/sh
-set -e
-
 URL="${1:-}"
 TOKEN="${2:-}"
 NAME="${3:-}"
@@ -12,26 +10,22 @@ wgman - OpenWrt router installer
 Usage:
   sh install-router.sh <api_url> <token> [name]
 
-Example:
-  sh install-router.sh https://vps.example.com:51821/register SECRETTOKEN router-home
-
 The router auto-detects its LAN subnet, generates WireGuard keys,
 registers itself with the wgman server and applies the config.
 EOF
 }
 
 [ -n "$URL" ] && [ -n "$TOKEN" ] || { usage; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "ERROR: run as root on the router"; exit 1; }
 
 HOSTPORT=${URL#*://}
 HOSTPORT=${HOSTPORT%%/*}
 case "$HOSTPORT" in
   *:*:*) case "$HOSTPORT" in
            *\[*) ;;
-           *) echo "ERROR: IPv6 endpoint must use brackets, e.g. https://[$HOSTPORT]:51821/register"; exit 1 ;;
+           *) echo "ERROR: IPv6 endpoint must use brackets, e.g. https://[ipv6]:51821/register"; exit 1 ;;
          esac ;;
 esac
-
-[ "$(id -u)" = "0" ] || { echo "ERROR: run as root on the router"; exit 1; }
 
 if [ -z "$NAME" ]; then
   NAME=$(uci -q get system.@system[0].hostname 2>/dev/null)
@@ -62,35 +56,39 @@ mask2bits() {
 }
 
 detect_lan() {
-  local dev cidr ip mask
+  local dev cidr addr mask
   dev=$(uci -q get network.lan.device)
   [ -n "$dev" ] || dev="br-lan"
-  cidr=$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4; exit}')
-  if [ -n "$cidr" ]; then
-    echo "$cidr"
-    return
-  fi
-  ip=$(uci -q get network.lan.ipaddr)
+
+  cidr=$(ubus -S call network.interface.lan status 2>/dev/null | \
+    sed -n 's/.*"ipv4-address":\[{"address":"\([0-9.]*\)","mask":\([0-9]*\).*/\1\/\2/p')
+  [ -n "$cidr" ] && { echo "$cidr"; return; }
+
+  addr=$(uci -q get network.lan.ipaddr)
   mask=$(uci -q get network.lan.netmask)
   [ -n "$mask" ] || mask="255.255.255.0"
-  if [ -n "$ip" ]; then
-    echo "$ip/$(mask2bits "$mask")"
+  if [ -n "$addr" ]; then
+    echo "$addr/$(mask2bits "$mask")"
     return
   fi
-  echo ""
+
+  cidr=$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4; exit}')
+  [ -n "$cidr" ] && echo "$cidr"
 }
 
 if ! command -v wg >/dev/null 2>&1; then
-  echo "==> WireGuard tools missing, trying to install..."
+  echo "==> WireGuard tools missing, installing packages..."
   opkg update >/dev/null 2>&1 || true
-  opkg install wireguard-tools kmod-wireguard luci-proto-wireguard >/dev/null 2>&1 || true
+  opkg install wireguard-tools >/dev/null 2>&1 || true
+  opkg install kmod-wireguard >/dev/null 2>&1 || true
+  opkg install luci-proto-wireguard >/dev/null 2>&1 || true
   command -v wg >/dev/null 2>&1 || { echo "ERROR: wg not found. Install wireguard-tools/kmod-wireguard."; exit 1; }
 fi
 
 LAN_CIDR=$(detect_lan)
 echo "==> LAN detected: ${LAN_CIDR:-unknown}"
 
-WG_PRIV=$(wg genkey)
+WG_PRIV=$(wg genkey) || { echo "ERROR: wg genkey failed"; exit 1; }
 WG_PUB=$(printf '%s' "$WG_PRIV" | wg pubkey)
 
 JSON="{\"token\":\"$TOKEN\",\"name\":\"$NAME\",\"public_key\":\"$WG_PUB\",\"lan_cidr\":\"$LAN_CIDR\",\"endpoint\":\"\"}"
@@ -136,8 +134,6 @@ SRV_PUB=$(printf '%s' "$RESP" | parse_json server_public_key)
 ENDPOINT=$(printf '%s' "$RESP" | parse_json server_endpoint)
 ALLOWED=$(printf '%s' "$RESP" | parse_json allowed_ips)
 DNS=$(printf '%s' "$RESP" | parse_json dns)
-DNS1=$(printf '%s' "$DNS" | cut -d, -f1)
-DNS2=$(printf '%s' "$DNS" | cut -d, -f2)
 
 [ -n "$WG_IP" ] && [ -n "$SRV_PUB" ] || { echo "ERROR: bad server response: $RESP"; exit 1; }
 [ -n "$ALLOWED" ] || ALLOWED="10.66.66.0/24"
@@ -146,13 +142,14 @@ EP_HOST="$ENDPOINT"; EP_PORT="51820"
 case "$ENDPOINT" in
   *:*) EP_HOST=${ENDPOINT%:*}; EP_PORT=${ENDPOINT##*:} ;;
 esac
-EP_HOST=${EP_HOST#\[}
-EP_HOST=${EP_HOST%\]}
+EP_HOST=${EP_HOST#[}
+EP_HOST=${EP_HOST%]}
 
 echo "==> Assigned WG IP: $WG_IP"
 echo "==> Applying OpenWrt configuration..."
 
 uci -q delete network.wg0
+uci -q delete network.wg0peer
 
 uci set network.wg0=interface
 uci set network.wg0.proto=wireguard
@@ -161,17 +158,22 @@ uci set network.wg0.listen_port=51820
 uci set network.wg0.mtu=1420
 uci set network.wg0.ipaddr="$WG_IP"
 uci set network.wg0.netmask=255.255.255.0
-uci set network.wg0.server=wireguard_peer
-uci set network.wg0.server.public_key="$SRV_PUB"
-uci set network.wg0.server.endpoint_host="$EP_HOST"
-uci set network.wg0.server.endpoint_port="$EP_PORT"
-uci set network.wg0.server.allowed_ips="$ALLOWED"
-uci set network.wg0.server.persistent_keepalive=25
-uci set network.wg0.server.route_allowed_ips=1
+
+uci set network.wg0peer=wireguard_peer
+uci set network.wg0peer.ifname=wg0
+uci set network.wg0peer.public_key="$SRV_PUB"
+uci set network.wg0peer.endpoint_host="$EP_HOST"
+uci set network.wg0peer.endpoint_port="$EP_PORT"
+uci set network.wg0peer.allowed_ips="$ALLOWED"
+uci set network.wg0peer.persistent_keepalive=25
+uci set network.wg0peer.route_allowed_ips=1
 
 LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.name='lan'" | sed "s/\.name.*//" | head -n1)
+if [ -z "$LAN_ZONE" ]; then
+  LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.network='lan'" | sed "s/\.network.*//" | head -n1)
+fi
 if [ -n "$LAN_ZONE" ]; then
-  CUR=$(uci -q get firewall.$LAN_ZONE.network 2>/dev/null || true)
+  CUR=$(uci -q get firewall.$LAN_ZONE.network 2>/dev/null)
   case " $CUR " in
     *" wg0 "*) echo "==> wg0 already in lan zone" ;;
     *) uci add_list firewall.$LAN_ZONE.network=wg0 ;;
@@ -194,7 +196,7 @@ else
 fi
 
 sleep 2
-STAT=$(ubus call network.interface.wg0 status 2>/dev/null || true)
+STAT=$(ubus call network.interface.wg0 status 2>/dev/null)
 case "$STAT" in
   *'"up":true'*) UP="up" ;;
   *) UP="not up (check dmesg / kmod-wireguard)" ;;
