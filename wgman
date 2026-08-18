@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-WGMAN_VER="2.15"
+WGMAN_VER="2.16"
 WG_DIR="/opt/wgman"
 STATE_DIR="$WG_DIR/state"
 CLIENTS_DIR="$STATE_DIR/clients"
@@ -770,7 +770,7 @@ cmd_passwd() {
   local pw="${1:-}"
   [ -n "$pw" ] || { echo "usage: wgman passwd <new-password>"; exit 1; }
   [ "$(id -u)" = "0" ] || { echo "ERROR: run as root"; exit 1; }
-  awk -v pw="$pw" 'BEGIN{OFS="="} $1=="ADMIN_PASS" {$2=pw; found=1} {print} END{if(!found) print "ADMIN_PASS=" pw}' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+  awk -F'=' -v pw="$pw" 'BEGIN{OFS="="} $1=="ADMIN_PASS" {$2=pw; found=1} {print} END{if(!found) print "ADMIN_PASS=" pw}' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
   echo "admin password updated (login on web UI https://<host>:$API_PORT)"
 }
