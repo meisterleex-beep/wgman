@@ -102,6 +102,21 @@ next_ip() {
   return 1
 }
 
+net_of() {
+  local ip cidr a b c d n mask
+  ip=${1%/*}
+  cidr=${1#*/}
+  IFS=. read -r a b c d <<< "$ip"
+  n=$(( (a<<24) | (b<<16) | (c<<8) | d ))
+  if [ "$cidr" -eq 0 ]; then
+    mask=0
+  else
+    mask=$(( ( (1<<cidr) - 1 ) << (32 - cidr) ))
+  fi
+  n=$(( n & mask ))
+  printf '%d.%d.%d.%d/%d' $(( (n>>24)&255 )) $(( (n>>16)&255 )) $(( (n>>8)&255 )) $(( n&255 )) "$cidr"
+}
+
 write_wg_conf() {
   local main_iface server_key
   main_iface=$(detect_main_iface)
@@ -123,7 +138,7 @@ write_wg_conf() {
       echo "[Peer]"
       echo "PublicKey = $ppub"
       if [ -n "$plan" ]; then
-        echo "AllowedIPs = $pip/32, $plan"
+        echo "AllowedIPs = $pip/32, $(net_of "$plan")"
       else
         echo "AllowedIPs = $pip/32"
       fi
@@ -148,7 +163,7 @@ write_awg_up() {
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
         ai="$pip/32"
-        [ -n "$plan" ] && ai="$pip/32, $plan"
+        [ -n "$plan" ] && ai="$pip/32, $(net_of "$plan")"
         echo "awg set awg0 peer '$ppub' allowed-ips '$ai' persistent-keepalive 25"
       done < "$PEERS_FILE"
       echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
@@ -157,7 +172,7 @@ write_awg_up() {
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
         echo "ip route replace $pip/32 dev awg0"
-        [ -n "$plan" ] && echo "ip route replace $plan dev awg0"
+        [ -n "$plan" ] && echo "ip route replace $(net_of "$plan") dev awg0"
       done < "$PEERS_FILE"
     while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
       [ -z "$pname" ] && continue
@@ -179,7 +194,7 @@ write_awg_up() {
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
         ai="$pip/32"
-        [ -n "$plan" ] && ai="$pip/32, $plan"
+        [ -n "$plan" ] && ai="$pip/32, $(net_of "$plan")"
         echo "awg set awg0 peer '$ppub' allowed-ips '$ai' persistent-keepalive 25"
       done < "$PEERS_FILE"
       echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
@@ -188,7 +203,7 @@ write_awg_up() {
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
         echo "ip route replace $pip/32 dev awg0"
-        [ -n "$plan" ] && echo "ip route replace $plan dev awg0"
+        [ -n "$plan" ] && echo "ip route replace $(net_of "$plan") dev awg0"
       done < "$PEERS_FILE"
     while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
       [ -z "$pname" ] && continue

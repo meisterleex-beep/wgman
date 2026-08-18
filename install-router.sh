@@ -88,6 +88,23 @@ detect_lan() {
   [ -n "$cidr" ] && echo "$cidr"
 }
 
+lan_net() {
+  local ip cidr a b c d n mask rest
+  ip=${1%/*}
+  cidr=${1#*/}
+  a=${ip%%.*}; rest=${ip#*.}
+  b=${rest%%.*}; rest=${rest#*.}
+  c=${rest%%.*}; d=${rest#*.}
+  n=$(( (a<<24) | (b<<16) | (c<<8) | d ))
+  if [ "$cidr" -eq 0 ]; then
+    mask=0
+  else
+    mask=$(( ( (1<<cidr) - 1 ) << (32 - cidr) ))
+  fi
+  n=$(( n & mask ))
+  echo "$(( (n>>24)&255 )).$(( (n>>16)&255 )).$(( (n>>8)&255 )).$(( n&255 ))/$cidr"
+}
+
 install_pkg() {
   if command -v apk >/dev/null 2>&1; then
     apk update >/dev/null 2>&1 || true
@@ -121,7 +138,7 @@ if ! command -v wg >/dev/null 2>&1; then
   command -v wg >/dev/null 2>&1 || { echo "ERROR: wg not found. Install wireguard-tools/kmod-wireguard."; exit 1; }
 fi
 
-LAN_CIDR=$(detect_lan)
+LAN_CIDR=$(lan_net "$(detect_lan)")
 echo "==> LAN detected: ${LAN_CIDR:-unknown}"
 
 if [ "$MODE" = "awg" ] && command -v awg >/dev/null 2>&1; then
