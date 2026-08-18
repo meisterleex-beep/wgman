@@ -35,6 +35,7 @@ AWG_H4="16384"
 AWG_UP="/usr/local/bin/awg0-up.sh"
 AWG_DOWN="/usr/local/bin/awg0-down.sh"
 AWG_SERVICE="/etc/systemd/system/awg0.service"
+AWG_MODE="auto"
 
 usage() {
   cat <<'EOF'
@@ -71,6 +72,20 @@ detect_main_iface() {
     iface=$(ip -o -4 addr show 2>/dev/null | awk '$2 != "lo" {print $2; exit}')
   fi
   echo "$iface"
+}
+
+kernel_has_awg() {
+  ip link del awgtest 2>/dev/null
+  if ip link add dev awgtest type amneziawg 2>/dev/null; then
+    ip link del awgtest 2>/dev/null
+    return 0
+  fi
+  modprobe amneziawg 2>/dev/null
+  if ip link add dev awgtest type amneziawg 2>/dev/null; then
+    ip link del awgtest 2>/dev/null
+    return 0
+  fi
+  return 1
 }
 
 next_ip() {
@@ -120,27 +135,47 @@ write_awg_up() {
   local main_iface server_key
   main_iface=$(detect_main_iface)
   server_key=$(cat "$SERVER_KEY_FILE")
-  {
-    echo '#!/usr/bin/env bash'
-    echo 'set -e'
-    echo 'SOCK=/var/run/amneziawg/awg0.sock'
-    echo 'for i in $(seq 1 20); do [ -S "$SOCK" ] && break; sleep 1; done'
-    echo '[ -S "$SOCK" ] || { echo "amneziawg-go UAPI socket not ready"; exit 1; }'
-    echo "awg set awg0 listen-port $AWG_PORT private-key '$server_key' awg-jc $AWG_JC awg-jmin $AWG_JMIN awg-jmax $AWG_JMAX awg-s1 $AWG_S1 awg-s2 $AWG_S2 awg-h1 $AWG_H1 awg-h2 $AWG_H2 awg-h3 $AWG_H3 awg-h4 $AWG_H4"
-    while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
-      [ -z "$pname" ] && continue
-      [ "$proto" = "awg" ] || continue
-      ai="$pip/32"
-      [ -n "$plan" ] && ai="$pip/32, $plan"
-      echo "awg set awg0 peer '$ppub' allowed-ips '$ai' persistent-keepalive 25"
-    done < "$PEERS_FILE"
-    echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
-    echo "ip link set dev awg0 up"
-    echo "iptables -t nat -C POSTROUTING -s $AWG_NET.0/$AWG_PREFIX -o $main_iface -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s $AWG_NET.0/$AWG_PREFIX -o $main_iface -j MASQUERADE"
-    echo "iptables -C INPUT -i awg0 -j ACCEPT 2>/dev/null || iptables -I INPUT -i awg0 -j ACCEPT"
-    echo "iptables -C FORWARD -i awg0 -o awg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -o awg0 -j ACCEPT"
-    echo "iptables -C INPUT -p udp --dport $AWG_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $AWG_PORT -j ACCEPT"
-  } > "$AWG_UP"
+  if [ "${AWG_MODE:-auto}" = "native" ]; then
+    {
+      echo '#!/usr/bin/env bash'
+      echo 'set -e'
+      echo 'ip link del awgtest 2>/dev/null || true'
+      echo 'ip link show awg0 >/dev/null 2>&1 || ip link add dev awg0 type amneziawg'
+      echo "awg set awg0 listen-port $AWG_PORT private-key '$server_key' awg-jc $AWG_JC awg-jmin $AWG_JMIN awg-jmax $AWG_JMAX awg-s1 $AWG_S1 awg-s2 $AWG_S2 awg-h1 $AWG_H1 awg-h2 $AWG_H2 awg-h3 $AWG_H3 awg-h4 $AWG_H4"
+      while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+        [ -z "$pname" ] && continue
+        [ "$proto" = "awg" ] || continue
+        ai="$pip/32"
+        [ -n "$plan" ] && ai="$pip/32, $plan"
+        echo "awg set awg0 peer '$ppub' allowed-ips '$ai' persistent-keepalive 25"
+      done < "$PEERS_FILE"
+      echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
+      echo "ip link set dev awg0 up"
+      echo "iptables -C INPUT -p udp --dport $AWG_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $AWG_PORT -j ACCEPT"
+    } > "$AWG_UP"
+  else
+    {
+      echo '#!/usr/bin/env bash'
+      echo 'set -e'
+      echo 'SOCK=/var/run/amneziawg/awg0.sock'
+      echo 'for i in $(seq 1 20); do [ -S "$SOCK" ] && break; sleep 1; done'
+      echo '[ -S "$SOCK" ] || { echo "amneziawg-go UAPI socket not ready"; exit 1; }'
+      echo "awg set awg0 listen-port $AWG_PORT private-key '$server_key' awg-jc $AWG_JC awg-jmin $AWG_JMIN awg-jmax $AWG_JMAX awg-s1 $AWG_S1 awg-s2 $AWG_S2 awg-h1 $AWG_H1 awg-h2 $AWG_H2 awg-h3 $AWG_H3 awg-h4 $AWG_H4"
+      while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+        [ -z "$pname" ] && continue
+        [ "$proto" = "awg" ] || continue
+        ai="$pip/32"
+        [ -n "$plan" ] && ai="$pip/32, $plan"
+        echo "awg set awg0 peer '$ppub' allowed-ips '$ai' persistent-keepalive 25"
+      done < "$PEERS_FILE"
+      echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
+      echo "ip link set dev awg0 up"
+      echo "iptables -C INPUT -p udp --dport $AWG_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $AWG_PORT -j ACCEPT"
+      echo "iptables -C INPUT -i awg0 -j ACCEPT 2>/dev/null || iptables -I INPUT -i awg0 -j ACCEPT"
+      echo "iptables -C FORWARD -i awg0 -o awg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -o awg0 -j ACCEPT"
+      echo "iptables -t nat -C POSTROUTING -s $AWG_NET.0/$AWG_PREFIX -o $main_iface -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s $AWG_NET.0/$AWG_PREFIX -o $main_iface -j MASQUERADE"
+    } > "$AWG_UP"
+  fi
   chmod +x "$AWG_UP"
 }
 
@@ -276,6 +311,7 @@ DNS1=$DNS1
 DNS2=$DNS2
 SERVER_HOST=$SERVER_HOST
 AWG=0
+AWG_MODE=auto
 AWG_NET=$AWG_NET
 AWG_PREFIX=$AWG_PREFIX
 AWG_PORT=$AWG_PORT
@@ -392,27 +428,45 @@ EOF
 }
 
 ensure_awg_bins() {
-  if command -v awg >/dev/null 2>&1 && command -v amneziawg-go >/dev/null 2>&1; then
-    return 0
+  if ! command -v awg >/dev/null 2>&1; then
+    echo "==> Building AmneziaWG tools (awg/awg-quick)..."
+    apt-get update -y
+    apt-get install -y golang-go build-essential git
+    rm -rf /tmp/awg-build
+    git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools /tmp/awg-build/tools
+    ( cd /tmp/awg-build/tools/src && make && make PREFIX=/usr/local install )
+    command -v awg >/dev/null 2>&1 || { echo "ERROR: awg build failed"; exit 1; }
   fi
-  echo "==> Building AmneziaWG (amneziawg-go + tools)..."
-  apt-get update -y
-  apt-get install -y golang-go build-essential git
-  rm -rf /tmp/awg-build
-  git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go /tmp/awg-build/go
-  ( cd /tmp/awg-build/go && go build -trimpath -o /usr/local/bin/amneziawg-go . )
-  git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools /tmp/awg-build/tools
-  ( cd /tmp/awg-build/tools/src && make && make PREFIX=/usr/local install )
-  command -v awg >/dev/null 2>&1 || { echo "ERROR: awg build failed"; exit 1; }
+  if [ "${AWG_MODE:-auto}" != "native" ] && ! command -v amneziawg-go >/dev/null 2>&1; then
+    echo "==> Building amneziawg-go (userspace)..."
+    apt-get install -y golang-go 2>/dev/null || true
+    git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go /tmp/awg-build/go
+    ( cd /tmp/awg-build/go && go build -trimpath -o /usr/local/bin/amneziawg-go . )
+  fi
 }
 
 ensure_awg_service() {
   mkdir -p /etc/amneziawg
   write_awg_up
   write_awg_down
-  cat > "$AWG_SERVICE" <<EOF
+  if [ "${AWG_MODE:-auto}" = "native" ]; then
+    cat > "$AWG_SERVICE" <<EOF
 [Unit]
-Description=AmneziaWG awg0
+Description=AmneziaWG awg0 (kernel)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$AWG_UP
+ExecStop=$AWG_DOWN
+[Install]
+WantedBy=multi-user.target
+EOF
+  else
+    cat > "$AWG_SERVICE" <<EOF
+[Unit]
+Description=AmneziaWG awg0 (userspace)
 After=network-online.target
 Wants=network-online.target
 [Service]
@@ -425,6 +479,7 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
+  fi
   systemctl daemon-reload
   systemctl enable awg0.service >/dev/null 2>&1 || true
 }
@@ -443,13 +498,19 @@ cmd_awg() {
   case "$action" in
     on)
       [ "$(id -u)" = "0" ] || { echo "ERROR: run as root"; exit 1; }
-      ensure_awg_bins
-      ensure_awg_service
+      if kernel_has_awg; then
+        AWG_MODE=native
+      else
+        AWG_MODE=userspace
+      fi
+      set_cfg AWG_MODE "$AWG_MODE"
       set_cfg AWG 1
       . "$CONFIG_FILE"
+      ensure_awg_bins
+      ensure_awg_service
       write_conf
       systemctl restart awg0.service 2>/dev/null || true
-      echo "AWG enabled: net $AWG_NET.0/$AWG_PREFIX, port $AWG_PORT/udp"
+      echo "AWG enabled ($AWG_MODE): net $AWG_NET.0/$AWG_PREFIX, port $AWG_PORT/udp"
       echo "On the router: sh install-router.sh <api_url> <token> name --awg"
       ;;
     off)
@@ -464,13 +525,13 @@ cmd_awg() {
       ;;
     status)
       if [ "${AWG:-0}" = "1" ]; then
-        echo "AWG: enabled"
+        echo "AWG: enabled (${AWG_MODE:-auto})"
         echo "net:  $AWG_NET.0/$AWG_PREFIX"
         echo "port: $AWG_PORT/udp"
         if [ -f "$AWG_SERVICE" ] && systemctl is-active --quiet awg0.service 2>/dev/null; then
-          echo "service: running"
+          echo "service: active"
         else
-          echo "service: stopped"
+          echo "service: inactive"
         fi
         awk -F'|' '$8=="awg" {printf "peer: %-18s %s\n",$1,$3}' "$PEERS_FILE" 2>/dev/null
       else
