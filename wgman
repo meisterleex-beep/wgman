@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-WGMAN_VER="2.10"
+WGMAN_VER="2.11"
 WG_DIR="/opt/wgman"
 STATE_DIR="$WG_DIR/state"
 CLIENTS_DIR="$STATE_DIR/clients"
@@ -795,13 +795,39 @@ cmd_router_new() {
     awk -F'|' -v n="$name" -v l="$lan" '$1!=n && $4==l && $6=="router" {print "WARNING: LAN " l " already used by " $1 > "/dev/stderr"}' "$PEERS_FILE"
   fi
   add_peer "$name" "$pub" "$ip" "$lan" "" "router" "$proto"
-  [ "$proto" = "awg" ] && { echo "OK $ip (awg)"; return; }
   srv_pub=$(cat "$SERVER_PUB_FILE")
   host="$SERVER_HOST"
-  [ -n "$host" ] || host="$NET.1"
-  ep=$(fmt_endpoint "$host" "$PORT")
   mkdir -p "$STATE_DIR/configs"
-  cat > "$STATE_DIR/configs/$name.conf" <<EOF
+  if [ "$proto" = "awg" ]; then
+    [ -n "$host" ] || host="$AWG_NET.1"
+    ep=$(fmt_endpoint "$host" "$AWG_PORT")
+    cat > "$STATE_DIR/configs/$name.conf" <<EOF
+[Interface]
+PrivateKey = $priv
+Address = $ip/$AWG_PREFIX
+DNS = $DNS1, $DNS2
+MTU = $AWG_MTU
+Jc = $AWG_JC
+Jmin = $AWG_JMIN
+Jmax = $AWG_JMAX
+S1 = $AWG_S1
+S2 = $AWG_S2
+H1 = $AWG_H1
+H2 = $AWG_H2
+H3 = $AWG_H3
+H4 = $AWG_H4
+
+[Peer]
+PublicKey = $srv_pub
+Endpoint = $ep
+AllowedIPs = $AWG_NET.0/$AWG_PREFIX
+PersistentKeepalive = 25
+EOF
+    echo "OK $ip (awg)"
+  else
+    [ -n "$host" ] || host="$NET.1"
+    ep=$(fmt_endpoint "$host" "$PORT")
+    cat > "$STATE_DIR/configs/$name.conf" <<EOF
 [Interface]
 PrivateKey = $priv
 Address = $ip/$PREFIX
@@ -813,7 +839,8 @@ Endpoint = $ep
 AllowedIPs = $NET.0/$PREFIX
 PersistentKeepalive = 25
 EOF
-  echo "OK $ip"
+    echo "OK $ip"
+  fi
   echo "conf: $STATE_DIR/configs/$name.conf"
 }
 

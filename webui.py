@@ -269,6 +269,7 @@ def dashboard(handler):
             "<div class='note'>To add a router automatically, run on the router itself: "
             "sh install-router.sh https://" + html.escape(fmt_endpoint(host, str(cfg.get("API_PORT", "51821"))))
             + "/register &lt;token&gt; name&lt;br&gt;Add &lt;b&gt;--awg&lt;/b&gt; to use the AmneziaWG tunnel (obfuscated, DPI-resistant). "
+            "The + PC client and + Router buttons ask which protocol to use. "
             "New PC/manager clients keep the token secret; only the admin password is needed here.</div>"
             "<script>"
             "const post=async(url,data)=>{const r=await fetch(url,{method:'POST',"
@@ -284,8 +285,9 @@ def dashboard(handler):
             "if(j.ok)location.reload();else alert(j.message);}"
             "async function addRouter(){const n=prompt('Router name:');if(!n)return;"
             "const l=prompt('LAN subnet (CIDR), optional:','');"
-            "const j=await post('/api/add_router',{name:n,lan:l||''});"
-            "if(j.ok){alert('Router created, WG IP: '+j.ip);"
+            "const awg=confirm('AmneziaWG (obfuscated, DPI-resistant)?\\nOK = AWG / Cancel = WireGuard');"
+            "const j=await post('/api/add_router',{name:n,lan:l||'',proto:awg?'awg':'wg'});"
+            "if(j.ok){alert('Router created, IP: '+j.ip+' ('+(awg?'AWG':'WG')+')');"
             "window.open('/api/config/'+n);location.reload();}else alert(j.message);}"
             "async function removePeer(n){if(!confirm('Remove '+n+'?'))return;"
             "const j=await post('/api/remove',{sel:n});"
@@ -409,12 +411,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/add_router":
             name = str(data.get("name") or "").strip()
             lan = str(data.get("lan") or "").strip()
-            rc, out, err = run_wgman(["router-new", name, lan])
+            proto = str(data.get("proto") or "wg").strip()
+            cmd = ["router-new", name, lan] + (["awg"] if proto == "awg" else [])
+            rc, out, err = run_wgman(cmd)
             if rc != 0:
                 send_json(self, 400, {"ok": False, "message": (err or out)})
             else:
-                ip = out.split("OK ")[-1].strip() if "OK " in out else ""
-                send_json(self, 200, {"ok": True, "name": name, "ip": ip})
+                ip = out.split("OK ")[-1].split()[0] if "OK " in out else ""
+                send_json(self, 200, {"ok": True, "name": name, "ip": ip, "proto": proto})
             return
         if path == "/api/remove":
             rc, out, err = run_wgman(["remove", str(data.get("sel") or "").strip()])
