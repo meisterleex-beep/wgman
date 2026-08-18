@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-WGMAN_VER="2.11"
+WGMAN_VER="2.12"
 WG_DIR="/opt/wgman"
 STATE_DIR="$WG_DIR/state"
 CLIENTS_DIR="$STATE_DIR/clients"
@@ -129,8 +129,12 @@ write_wg_conf() {
     echo "PostUp = iptables -t nat -A POSTROUTING -s $NET.0/$PREFIX -o $main_iface -j MASQUERADE"
     echo "PostUp = iptables -I INPUT -i wg0 -j ACCEPT"
     echo "PostUp = iptables -I FORWARD -i wg0 -o wg0 -j ACCEPT"
+    echo "PostUp = iptables -I FORWARD -i wg0 -o $main_iface -j ACCEPT"
+    echo "PostUp = iptables -I FORWARD -i $main_iface -o wg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
     echo "PostDown = iptables -D INPUT -i wg0 -j ACCEPT"
     echo "PostDown = iptables -D FORWARD -i wg0 -o wg0 -j ACCEPT"
+    echo "PostDown = iptables -D FORWARD -i wg0 -o $main_iface -j ACCEPT"
+    echo "PostDown = iptables -D FORWARD -i $main_iface -o wg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
     while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
       [ -z "$pname" ] && continue
       [ "$proto" = "awg" ] && continue
@@ -201,7 +205,11 @@ write_awg_up() {
       done < "$PEERS_FILE"
       echo "iptables -C INPUT -p udp --dport $AWG_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $AWG_PORT -j ACCEPT"
       echo "iptables -C INPUT -i awg0 -j ACCEPT 2>/dev/null || iptables -I INPUT -i awg0 -j ACCEPT"
-      echo "iptables -C FORWARD -i awg0 -o awg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -o awg0 -j ACCEPT"
+    echo "iptables -C FORWARD -i awg0 -o awg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -o awg0 -j ACCEPT"
+    echo "iptables -C FORWARD -i awg0 -o $main_iface -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -o $main_iface -j ACCEPT"
+    echo "iptables -C FORWARD -i $main_iface -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I FORWARD -i $main_iface -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+      echo "iptables -C FORWARD -i awg0 -o $main_iface -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -o $main_iface -j ACCEPT"
+      echo "iptables -C FORWARD -i $main_iface -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I FORWARD -i $main_iface -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
       echo "iptables -t nat -C POSTROUTING -s $AWG_NET.0/$AWG_PREFIX -o $main_iface -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s $AWG_NET.0/$AWG_PREFIX -o $main_iface -j MASQUERADE"
     } > "$AWG_UP"
   fi
@@ -218,6 +226,8 @@ write_awg_down() {
     echo "iptables -D INPUT -p udp --dport $AWG_PORT -j ACCEPT 2>/dev/null || true"
     echo "iptables -D INPUT -i awg0 -j ACCEPT 2>/dev/null || true"
     echo "iptables -D FORWARD -i awg0 -o awg0 -j ACCEPT 2>/dev/null || true"
+    echo "iptables -D FORWARD -i awg0 -o $main_iface -j ACCEPT 2>/dev/null || true"
+    echo "iptables -D FORWARD -i $main_iface -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true"
     echo "iptables -t nat -D POSTROUTING -s $AWG_NET.0/$AWG_PREFIX -o $main_iface -j MASQUERADE 2>/dev/null || true"
   } > "$AWG_DOWN"
   chmod +x "$AWG_DOWN"
