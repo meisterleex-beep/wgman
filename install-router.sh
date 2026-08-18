@@ -34,7 +34,7 @@ fi
 NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-32)
 
 echo "==> Router name: $NAME"
-echo "==> install-router.sh version: 2.1 (universal)"
+echo "==> install-router.sh version: 2.2 (universal)"
 
 mask2bits() {
   local m=$1 bits=0 o oifs
