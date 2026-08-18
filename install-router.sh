@@ -1,17 +1,28 @@
 #!/bin/sh
-URL="${1:-}"
-TOKEN="${2:-}"
-NAME="${3:-}"
+URL=""
+TOKEN=""
+NAME=""
+MODE="wg"
+
+idx=0
+for a in "$@"; do
+  case "$a" in
+    --awg) MODE="awg" ;;
+    --wg) MODE="wg" ;;
+    *) idx=$((idx+1)); [ "$idx" = "1" ] && URL=$a; [ "$idx" = "2" ] && TOKEN=$a; [ "$idx" = "3" ] && NAME=$a ;;
+  esac
+done
 
 usage() {
   cat <<'EOF'
 wgman - OpenWrt router installer
 
 Usage:
-  sh install-router.sh <api_url> <token> [name]
+  sh install-router.sh <api_url> <token> [name] [--wg|--awg]
 
-The router auto-detects its LAN subnet, generates WireGuard keys,
+The router auto-detects its LAN subnet, generates WireGuard/AmneziaWG keys,
 registers itself with the wgman server and applies the config.
+Use --awg to enable the AmneziaWG tunnel (obfuscated, bypasses DPI blocking).
 EOF
 }
 
@@ -34,7 +45,7 @@ fi
 NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-32)
 
 echo "==> Router name: $NAME"
-echo "==> install-router.sh version: 2.4 (universal)"
+echo "==> install-router.sh version: 2.5 (wg + awg), mode: $MODE"
 
 mask2bits() {
   local m=$1 bits=0 o oifs
@@ -87,6 +98,23 @@ install_pkg() {
   fi
 }
 
+install_awg() {
+  echo "==> AmneziaWG tools missing, installing from awg-openwrt..."
+  wget -q -O /tmp/awg-install.sh "https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh" 2>/dev/null || true
+  if [ -s /tmp/awg-install.sh ]; then
+    sh /tmp/awg-install.sh -e -n >/dev/null 2>&1 || true
+  fi
+  command -v awg >/dev/null 2>&1 || {
+    echo "ERROR: awg not found. Install kmod-amneziawg + amneziawg-tools"
+    echo "       (see /tmp/awg-install.sh output) or run install script manually."
+    exit 1
+  }
+}
+
+if [ "$MODE" = "awg" ] && ! command -v awg >/dev/null 2>&1; then
+  install_awg
+fi
+
 if ! command -v wg >/dev/null 2>&1; then
   echo "==> WireGuard tools missing, installing packages..."
   install_pkg wireguard-tools kmod-wireguard luci-proto-wireguard
@@ -96,10 +124,15 @@ fi
 LAN_CIDR=$(detect_lan)
 echo "==> LAN detected: ${LAN_CIDR:-unknown}"
 
-WG_PRIV=$(wg genkey) || { echo "ERROR: wg genkey failed"; exit 1; }
-WG_PUB=$(printf '%s' "$WG_PRIV" | wg pubkey)
+if [ "$MODE" = "awg" ] && command -v awg >/dev/null 2>&1; then
+  WG_PRIV=$(awg genkey 2>/dev/null) || WG_PRIV=$(wg genkey)
+  WG_PUB=$(printf '%s' "$WG_PRIV" | awg pubkey 2>/dev/null || printf '%s' "$WG_PRIV" | wg pubkey)
+else
+  WG_PRIV=$(wg genkey) || { echo "ERROR: wg genkey failed"; exit 1; }
+  WG_PUB=$(printf '%s' "$WG_PRIV" | wg pubkey)
+fi
 
-JSON="{\"token\":\"$TOKEN\",\"name\":\"$NAME\",\"public_key\":\"$WG_PUB\",\"lan_cidr\":\"$LAN_CIDR\",\"endpoint\":\"\"}"
+JSON="{\"token\":\"$TOKEN\",\"name\":\"$NAME\",\"public_key\":\"$WG_PUB\",\"lan_cidr\":\"$LAN_CIDR\",\"endpoint\":\"\",\"proto\":\"$MODE\"}"
 
 post_json() {
   local data=$1 out=""
@@ -144,7 +177,6 @@ ALLOWED=$(printf '%s' "$RESP" | parse_json allowed_ips)
 DNS=$(printf '%s' "$RESP" | parse_json dns)
 
 [ -n "$WG_IP" ] && [ -n "$SRV_PUB" ] || { echo "ERROR: bad server response: $RESP"; exit 1; }
-[ -n "$ALLOWED" ] || ALLOWED="10.66.66.0/24"
 
 EP_HOST="$ENDPOINT"; EP_PORT="51820"
 case "$ENDPOINT" in
@@ -153,7 +185,24 @@ esac
 EP_HOST=${EP_HOST#[}
 EP_HOST=${EP_HOST%]}
 
-echo "==> Assigned WG IP: $WG_IP"
+if [ "$MODE" = "awg" ]; then
+  [ -n "$ALLOWED" ] || ALLOWED="10.66.77.0/24"
+  P_AWG=$(printf '%s' "$RESP" | parse_json awg_port); [ -n "$P_AWG" ] && EP_PORT="$P_AWG"
+  MTU=$(printf '%s' "$RESP" | parse_json mtu); [ -n "$MTU" ] || MTU="1420"
+  AWG_JC=$(printf '%s' "$RESP" | parse_json awg_jc);   [ -n "$AWG_JC" ] || AWG_JC="50"
+  AWG_JMIN=$(printf '%s' "$RESP" | parse_json awg_jmin); [ -n "$AWG_JMIN" ] || AWG_JMIN="5"
+  AWG_JMAX=$(printf '%s' "$RESP" | parse_json awg_jmax); [ -n "$AWG_JMAX" ] || AWG_JMAX="5"
+  AWG_S1=$(printf '%s' "$RESP" | parse_json awg_s1);  [ -n "$AWG_S1" ] || AWG_S1="0"
+  AWG_S2=$(printf '%s' "$RESP" | parse_json awg_s2);  [ -n "$AWG_S2" ] || AWG_S2="0"
+  AWG_H1=$(printf '%s' "$RESP" | parse_json awg_h1);  [ -n "$AWG_H1" ] || AWG_H1="2048"
+  AWG_H2=$(printf '%s' "$RESP" | parse_json awg_h2);  [ -n "$AWG_H2" ] || AWG_H2="4096"
+  AWG_H3=$(printf '%s' "$RESP" | parse_json awg_h3);  [ -n "$AWG_H3" ] || AWG_H3="8192"
+  AWG_H4=$(printf '%s' "$RESP" | parse_json awg_h4);  [ -n "$AWG_H4" ] || AWG_H4="16384"
+else
+  [ -n "$ALLOWED" ] || ALLOWED="10.66.66.0/24"
+fi
+
+echo "==> Assigned IP: $WG_IP  mode: $MODE"
 echo "==> Applying OpenWrt configuration..."
 
 PREFIX=${ALLOWED##*/}
@@ -163,60 +212,119 @@ uci_run() {
   uci "$@" || { echo "ERROR: failed command: uci $*"; exit 1; }
 }
 
-uci -q delete network.wg0 2>/dev/null
-uci -q delete network.wg0peer 2>/dev/null
-uci -q delete network.wireguard_wg0 2>/dev/null
-uci -q delete network.@wireguard_wg0 2>/dev/null
+configure_wg() {
+  uci -q delete network.wg0 2>/dev/null
+  uci -q delete network.wg0peer 2>/dev/null
+  uci -q delete network.wireguard_wg0 2>/dev/null
+  uci -q delete network.@wireguard_wg0 2>/dev/null
 
-uci_run set network.wg0=interface
-uci_run set network.wg0.proto=wireguard
-uci_run set network.wg0.private_key="$WG_PRIV"
-uci_run set network.wg0.listen_port=51820
-uci_run set network.wg0.mtu=1420
-uci_run add_list network.wg0.addresses="$WG_IP/$PREFIX"
+  uci_run set network.wg0=interface
+  uci_run set network.wg0.proto=wireguard
+  uci_run set network.wg0.private_key="$WG_PRIV"
+  uci_run set network.wg0.listen_port=51820
+  uci_run set network.wg0.mtu=1420
+  uci_run add_list network.wg0.addresses="$WG_IP/$PREFIX"
 
-uci_run set network.wireguard_wg0=wireguard_wg0
-uci_run set network.wireguard_wg0.public_key="$SRV_PUB"
-uci_run set network.wireguard_wg0.endpoint_host="$EP_HOST"
-uci_run set network.wireguard_wg0.endpoint_port="$EP_PORT"
-uci_run add_list network.wireguard_wg0.allowed_ips="$ALLOWED"
-uci_run set network.wireguard_wg0.persistent_keepalive=25
-uci_run set network.wireguard_wg0.route_allowed_ips=1
+  uci_run set network.wireguard_wg0=wireguard_wg0
+  uci_run set network.wireguard_wg0.public_key="$SRV_PUB"
+  uci_run set network.wireguard_wg0.endpoint_host="$EP_HOST"
+  uci_run set network.wireguard_wg0.endpoint_port="$EP_PORT"
+  uci_run add_list network.wireguard_wg0.allowed_ips="$ALLOWED"
+  uci_run set network.wireguard_wg0.persistent_keepalive=25
+  uci_run set network.wireguard_wg0.route_allowed_ips=1
 
-LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.name='lan'" | sed "s/\.name.*//" | head -n1)
-if [ -z "$LAN_ZONE" ]; then
-  LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.network='lan'" | sed "s/\.network.*//" | head -n1)
-fi
-if [ -n "$LAN_ZONE" ]; then
-  CUR=$(uci -q get "$LAN_ZONE.network" 2>/dev/null)
-  case " $CUR " in
-    *" wg0 "*) echo "==> wg0 already in lan zone" ;;
-    *) uci_run add_list "$LAN_ZONE.network=wg0" ;;
-  esac
+  LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.name='lan'" | sed "s/\.name.*//" | head -n1)
+  if [ -z "$LAN_ZONE" ]; then
+    LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.network='lan'" | sed "s/\.network.*//" | head -n1)
+  fi
+  if [ -n "$LAN_ZONE" ]; then
+    CUR=$(uci -q get "$LAN_ZONE.network" 2>/dev/null)
+    case " $CUR " in
+      *" wg0 "*) echo "==> wg0 already in lan zone" ;;
+      *) uci_run add_list "$LAN_ZONE.network=wg0" ;;
+    esac
+  else
+    echo "WARNING: lan firewall zone not found, wg0 not added to it"
+  fi
+}
+
+configure_awg() {
+  uci -q delete network.wg0 2>/dev/null
+  uci -q delete network.wg0peer 2>/dev/null
+  uci -q delete network.wireguard_wg0 2>/dev/null
+  uci -q delete network.@wireguard_wg0 2>/dev/null
+  uci -q delete network.awg1 2>/dev/null
+  uci -q delete network.amneziawg_awg1 2>/dev/null
+  uci -q delete network.@amneziawg_awg1 2>/dev/null
+
+  uci_run set network.awg1=interface
+  uci_run set network.awg1.proto=amneziawg
+  uci_run set network.awg1.private_key="$WG_PRIV"
+  uci_run set network.awg1.listen_port="$EP_PORT"
+  uci_run set network.awg1.mtu="$MTU"
+  uci_run add_list network.awg1.addresses="$WG_IP/$PREFIX"
+  uci_run set network.awg1.awg_jc="$AWG_JC"
+  uci_run set network.awg1.awg_jmin="$AWG_JMIN"
+  uci_run set network.awg1.awg_jmax="$AWG_JMAX"
+  uci_run set network.awg1.awg_s1="$AWG_S1"
+  uci_run set network.awg1.awg_s2="$AWG_S2"
+  uci_run set network.awg1.awg_h1="$AWG_H1"
+  uci_run set network.awg1.awg_h2="$AWG_H2"
+  uci_run set network.awg1.awg_h3="$AWG_H3"
+  uci_run set network.awg1.awg_h4="$AWG_H4"
+
+  uci_run set network.amneziawg_awg1=amneziawg_awg1
+  uci_run set network.amneziawg_awg1.public_key="$SRV_PUB"
+  uci_run set network.amneziawg_awg1.endpoint_host="$EP_HOST"
+  uci_run set network.amneziawg_awg1.endpoint_port="$EP_PORT"
+  uci_run add_list network.amneziawg_awg1.allowed_ips="$ALLOWED"
+  uci_run set network.amneziawg_awg1.persistent_keepalive=25
+  uci_run set network.amneziawg_awg1.route_allowed_ips=1
+
+  LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.name='lan'" | sed "s/\.name.*//" | head -n1)
+  if [ -z "$LAN_ZONE" ]; then
+    LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.network='lan'" | sed "s/\.network.*//" | head -n1)
+  fi
+  if [ -n "$LAN_ZONE" ]; then
+    uci -q del_list "$LAN_ZONE.network=wg0" 2>/dev/null || true
+    CUR=$(uci -q get "$LAN_ZONE.network" 2>/dev/null)
+    case " $CUR " in
+      *" awg1 "*) echo "==> awg1 already in lan zone" ;;
+      *) uci_run add_list "$LAN_ZONE.network=awg1" ;;
+    esac
+  else
+    echo "WARNING: lan firewall zone not found, awg1 not added to it"
+  fi
+}
+
+if [ "$MODE" = "awg" ]; then
+  configure_awg
 else
-  echo "WARNING: lan firewall zone not found, wg0 not added to it"
+  configure_wg
 fi
 
 uci_run commit network
 uci_run commit firewall
 
+IFACE=wg0; [ "$MODE" = "awg" ] && IFACE=awg1
+
 /etc/init.d/network reload
 sleep 2
-ifup wg0 2>/dev/null || true
+ifup "$IFACE" 2>/dev/null || true
 fw4 reload 2>/dev/null || fw3 reload 2>/dev/null || true
 
 sleep 3
-STAT=$(ubus call network.interface.wg0 status 2>/dev/null)
+STAT=$(ubus call "network.interface.$IFACE" status 2>/dev/null)
 case "$STAT" in
   *'"up":true'*) UP="up" ;;
   *)
-    echo "==> wg0 not up after reload, restarting network..."
+    echo "==> $IFACE not up after reload, restarting network..."
     /etc/init.d/network restart 2>/dev/null || true
     sleep 5
-    STAT=$(ubus call network.interface.wg0 status 2>/dev/null)
+    STAT=$(ubus call "network.interface.$IFACE" status 2>/dev/null)
     case "$STAT" in
       *'"up":true'*) UP="up" ;;
-      *) UP="not up (check dmesg / kmod-wireguard / luci-proto-wireguard)" ;;
+      *) UP="not up (check dmesg / kmod / packages)" ;;
     esac
     ;;
 esac
@@ -224,7 +332,8 @@ esac
 echo ""
 echo "=== Done ==="
 echo "Router:      $NAME"
-echo "WG address:  $WG_IP"
+echo "Mode:        $MODE"
+echo "Address:     $WG_IP"
 echo "Server:      $EP_HOST:$EP_PORT"
-echo "Interface:   $UP"
+echo "Interface:   $IFACE $UP"
 echo "You can manage this router over VPN at https://$WG_IP (LuCI)"

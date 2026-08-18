@@ -22,6 +22,9 @@ KEY_FILE = os.path.join(STATE_DIR, "server.key")
 SERVER_PUB_FILE = "/etc/wireguard/server.pub"
 API_PORT = 51821
 
+AWG_DEFAULTS = {"JC": "50", "JMIN": "5", "JMAX": "5", "S1": "0", "S2": "0",
+                "H1": "2048", "H2": "4096", "H3": "8192", "H4": "16384"}
+
 
 def read_file(p):
     try:
@@ -97,20 +100,21 @@ def auth_ok(req):
 
 
 def handshakes():
-    try:
-        res = subprocess.run(["wg", "show", "wg0", "latest-handshakes"],
-                             capture_output=True, text=True)
-        out = res.stdout or ""
-    except OSError:
-        return {}
     hs = {}
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) == 2:
-            try:
-                hs[parts[0]] = int(parts[1])
-            except ValueError:
-                pass
+    for cmd in (["wg", "show", "wg0", "latest-handshakes"],
+                ["awg", "show", "awg0", "latest-handshakes"]):
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            out = res.stdout or ""
+        except OSError:
+            continue
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                try:
+                    hs[parts[0]] = int(parts[1])
+                except ValueError:
+                    pass
     return hs
 
 
@@ -119,9 +123,11 @@ def parse_peers():
     for line in read_file(PEERS_FILE).splitlines():
         parts = line.split("|")
         if len(parts) >= 7:
+            proto = parts[7] if len(parts) > 7 and parts[7] else "wg"
             peers.append({
                 "name": parts[0], "pub": parts[1], "ip": parts[2],
                 "lan": parts[3], "ep": parts[4], "type": parts[5], "date": parts[6],
+                "proto": proto,
             })
     return peers
 
@@ -201,6 +207,15 @@ def dashboard(handler):
     srv_pub = read_file(SERVER_PUB_FILE)
 
     ep_disp = fmt_endpoint(host, port) or "<unknown, set host>"
+    awg_kv = ""
+    if cfg.get("AWG") == "1":
+        awg_port = cfg.get("AWG_PORT", "51823")
+        awg_net = cfg.get("AWG_NET", "10.66.77")
+        awg_prefix = cfg.get("AWG_PREFIX", "24")
+        awg_kv = ("<div class='kv'><span class='k'>AWG endpoint</span><span class='v'>"
+                  + html.escape(fmt_endpoint(host, awg_port)) + "</span></div>"
+                  "<div class='kv'><span class='k'>AWG network</span><span class='v'>"
+                  + html.escape(awg_net + ".0/" + awg_prefix) + "</span></div>")
     rows = []
     for p in peers:
         now = time.time()
@@ -209,11 +224,13 @@ def dashboard(handler):
         status = ("<span class='badge b-on'>online</span>" if online
                   else "<span class='badge b-off'>offline</span>")
         tlabel = "router" if p["type"] == "router" else "client"
+        proto = p.get("proto") or "wg"
         rows.append(
             "<tr><td class='mono'>" + html.escape(p["name"]) + "</td>"
             "<td class='mono'>" + html.escape(p["ip"]) + "</td>"
             "<td class='mono'>" + html.escape(p["lan"]) + "</td>"
             "<td>" + tlabel + "</td>"
+            "<td class='mono'>" + proto.upper() + "</td>"
             "<td class='mono'>" + html.escape(p["ep"]) + "</td>"
             "<td>" + status + "</td>"
             "<td>" + html.escape(p["date"]) + "</td>"
@@ -222,7 +239,7 @@ def dashboard(handler):
             "<a class='btn danger' href='#' onclick='removePeer(\"" + html.escape(p["name"], quote=True)
             + "\");return false;'>del</a></td></tr>")
 
-    peer_rows = "\n".join(rows) if rows else ("<tr><td colspan='8' style='color:#8b949e'>"
+    peer_rows = "\n".join(rows) if rows else ("<tr><td colspan='9' style='color:#8b949e'>"
                                               "No peers yet. Add a PC client or register a router.</td></tr>")
 
     body = ("<h1>wgman</h1><div class='sub'>WireGuard manager for OpenWrt routers</div>"
@@ -230,6 +247,7 @@ def dashboard(handler):
             "<div class='kv'><span class='k'>Endpoint</span><span class='v'>" + html.escape(ep_disp) + "</span></div>"
             "<div class='kv'><span class='k'>WG network</span><span class='v'>" + html.escape(net + ".0/" + prefix) + "</span></div>"
             "<div class='kv'><span class='k'>Port</span><span class='v'>" + html.escape(port) + "/udp</span></div>"
+            + awg_kv +
             "<div class='kv'><span class='k'>Public key</span><span class='v'>" + html.escape(srv_pub) + "</span></div>"
             "</div></div>"
             "<div class='actions'>"
@@ -240,12 +258,12 @@ def dashboard(handler):
             "<a class='btn' href='/logout'>Logout</a>"
             "</div>"
             "<div class='card'><h2>Peers</h2><table>"
-            "<thead><tr><th>Name</th><th>WG IP</th><th>LAN</th><th>Type</th><th>Endpoint</th>"
+            "<thead><tr><th>Name</th><th>WG IP</th><th>LAN</th><th>Type</th><th>Proto</th><th>Endpoint</th>"
             "<th>Status</th><th>Added</th><th>Actions</th></tr></thead>"
             "<tbody>" + peer_rows + "</tbody></table></div>"
             "<div class='note'>To add a router automatically, run on the router itself: "
             "sh install-router.sh https://" + html.escape(fmt_endpoint(host, str(cfg.get("API_PORT", "51821"))))
-            + "/register &lt;token&gt; name. "
+            + "/register &lt;token&gt; name&lt;br&gt;Add &lt;b&gt;--awg&lt;/b&gt; to use the AmneziaWG tunnel (obfuscated, DPI-resistant). "
             "New PC/manager clients keep the token secret; only the admin password is needed here.</div>"
             "<script>"
             "const post=async(url,data)=>{const r=await fetch(url,{method:'POST',"
@@ -413,10 +431,13 @@ class Handler(BaseHTTPRequestHandler):
         pub = (req.get("public_key") or "").strip()
         lan = (req.get("lan_cidr") or "").strip()
         ep = (req.get("endpoint") or "").strip()
+        proto = (req.get("proto") or "wg").strip()
+        if proto not in ("wg", "awg"):
+            proto = "wg"
         if not name or not pub:
             send_json(self, 400, {"status": "error", "message": "name and public_key are required"})
             return
-        rc, out, err = run_wgman(["_register", name, pub, lan, ep])
+        rc, out, err = run_wgman(["_register", name, pub, lan, ep, proto])
         lines = out.strip().splitlines()
         if rc != 0:
             send_json(self, 400, {"status": "error", "message": (err or out or "registration failed")})
@@ -427,18 +448,26 @@ class Handler(BaseHTTPRequestHandler):
         ip = lines[-1][3:].strip()
         host = cfg.get("SERVER_HOST", "")
         port = cfg.get("PORT", "51820")
-        endpoint = fmt_endpoint(host, port)
-        net = cfg.get("NET", "10.66.66")
-        prefix = cfg.get("PREFIX", "24")
         dns = cfg.get("DNS1", "1.1.1.1") + "," + cfg.get("DNS2", "8.8.8.8")
-        send_json(self, 200, {
+        resp = {
             "status": "ok",
             "ip": ip,
             "server_public_key": read_file(SERVER_PUB_FILE),
-            "server_endpoint": endpoint,
             "dns": dns,
-            "allowed_ips": net + ".0/" + prefix,
-        })
+            "proto": proto,
+        }
+        if proto == "awg":
+            ap = cfg.get("AWG_PORT", "51823")
+            resp["server_endpoint"] = fmt_endpoint(host, ap)
+            resp["allowed_ips"] = cfg.get("AWG_NET", "10.66.77") + ".0/" + cfg.get("AWG_PREFIX", "24")
+            resp["awg_port"] = ap
+            resp["mtu"] = cfg.get("AWG_MTU", "1420")
+            for k in ("JC", "JMIN", "JMAX", "S1", "S2", "H1", "H2", "H3", "H4"):
+                resp["awg_" + k.lower()] = cfg.get("AWG_" + k, AWG_DEFAULTS[k])
+        else:
+            resp["server_endpoint"] = fmt_endpoint(host, port)
+            resp["allowed_ips"] = cfg.get("NET", "10.66.66") + ".0/" + cfg.get("PREFIX", "24")
+        send_json(self, 200, resp)
 
 
 def read_file_prefix(path, key):
