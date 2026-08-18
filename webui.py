@@ -207,8 +207,11 @@ def dashboard(handler):
     srv_pub = read_file(SERVER_PUB_FILE)
 
     ep_disp = fmt_endpoint(host, port) or "<unknown, set host>"
+    awg_on = cfg.get("AWG") == "1"
+    awg_state_disp = ("<span class='badge b-on'>enabled</span>" if awg_on
+                      else "<span class='badge b-off'>disabled</span>")
     awg_kv = ""
-    if cfg.get("AWG") == "1":
+    if awg_on:
         awg_port = cfg.get("AWG_PORT", "51823")
         awg_net = cfg.get("AWG_NET", "10.66.77")
         awg_prefix = cfg.get("AWG_PREFIX", "24")
@@ -248,11 +251,13 @@ def dashboard(handler):
             "<div class='kv'><span class='k'>WG network</span><span class='v'>" + html.escape(net + ".0/" + prefix) + "</span></div>"
             "<div class='kv'><span class='k'>Port</span><span class='v'>" + html.escape(port) + "/udp</span></div>"
             + awg_kv +
+            "<div class='kv'><span class='k'>AWG tunnel</span><span class='v'>" + awg_state_disp + "</span></div>"
             "<div class='kv'><span class='k'>Public key</span><span class='v'>" + html.escape(srv_pub) + "</span></div>"
             "</div></div>"
             "<div class='actions'>"
             "<button onclick='addClient()'>+ PC client</button>"
             "<button onclick='addRouter()'>+ Router</button>"
+            "<button onclick='toggleAwg()'>AWG: " + ("disable" if awg_on else "enable") + "</button>"
             "<button onclick='rotateToken()'>Rotate API token</button>"
             "<button onclick='setHost()'>Set host</button>"
             "<a class='btn' href='/logout'>Logout</a>"
@@ -270,9 +275,13 @@ def dashboard(handler):
             "headers:{'Content-Type':'application/json'},body:JSON.stringify(data||{})});"
             "return r.json().catch(()=>({ok:false,message:'bad response'}));};"
             "async function addClient(){const n=prompt('Client name:');if(!n)return;"
-            "const j=await post('/api/add_client',{name:n});"
-            "if(j.ok){alert('Client created: '+n);window.open('/api/config/'+n);"
+            "const awg=confirm('AmneziaWG (obfuscated, DPI-resistant)?\\nOK = AWG / Cancel = WireGuard');"
+            "const j=await post('/api/add_client',{name:n,proto:awg?'awg':'wg'});"
+            "if(j.ok){alert('Client created: '+n+' ('+(awg?'AWG':'WG')+')');window.open('/api/config/'+n);"
             "location.reload();}else alert(j.message);}"
+            "async function toggleAwg(){const now=" + ("true" if awg_on else "false") + ";"
+            "const j=await post('/api/awg',{action:now?'off':'on'});"
+            "if(j.ok)location.reload();else alert(j.message);}"
             "async function addRouter(){const n=prompt('Router name:');if(!n)return;"
             "const l=prompt('LAN subnet (CIDR), optional:','');"
             "const j=await post('/api/add_router',{name:n,lan:l||''});"
@@ -339,6 +348,11 @@ class Handler(BaseHTTPRequestHandler):
                     "net": cfg.get("NET", "10.66.66") + ".0/" + cfg.get("PREFIX", "24"),
                     "public_key": read_file(SERVER_PUB_FILE),
                 },
+                "awg": {
+                    "enabled": cfg.get("AWG") == "1",
+                    "endpoint": fmt_endpoint(cfg.get("SERVER_HOST", ""), cfg.get("AWG_PORT", "51823")),
+                    "net": cfg.get("AWG_NET", "10.66.77") + ".0/" + cfg.get("AWG_PREFIX", "24"),
+                },
                 "peers": parse_peers(),
             })
             return
@@ -375,11 +389,22 @@ class Handler(BaseHTTPRequestHandler):
         data = self._read_json()
         if path == "/api/add_client":
             name = str(data.get("name") or "").strip()
-            rc, out, err = run_wgman(["add", name])
+            proto = str(data.get("proto") or "wg").strip()
+            cmd = ["add", name] + (["--awg"] if proto == "awg" else [])
+            rc, out, err = run_wgman(cmd)
             if rc != 0:
                 send_json(self, 400, {"ok": False, "message": (err or out)})
             else:
                 send_json(self, 200, {"ok": True, "name": name})
+            return
+        if path == "/api/awg":
+            action = str(data.get("action") or "").strip()
+            if action not in ("on", "off"):
+                send_json(self, 400, {"ok": False, "message": "action must be on or off"})
+                return
+            rc, out, err = run_wgman(["awg", action])
+            send_json(self, 200 if rc == 0 else 400,
+                      {"ok": rc == 0, "message": (err or out)})
             return
         if path == "/api/add_router":
             name = str(data.get("name") or "").strip()
