@@ -395,7 +395,7 @@ cmd_register() {
   local name="${1:-}" pub="${2:-}" lan="${3:-}" ep="${4:-}"
   validate_name "$name" || { echo "invalid name"; exit 1; }
   case "$pub" in
-    *[!A-Za-z0-9+/]*|'' ) echo "invalid public key"; exit 1 ;;
+    *[!A-Za-z0-9+/=]*|'' ) echo "invalid public key"; exit 1 ;;
   esac
   [ ${#pub} -eq 44 ] || { echo "invalid public key length"; exit 1; }
   grep -q "^$name|" "$PEERS_FILE" && { echo "peer '$name' already exists"; exit 1; }

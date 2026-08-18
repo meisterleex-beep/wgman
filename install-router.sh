@@ -31,7 +31,7 @@ if [ -z "$NAME" ]; then
   NAME=$(uci -q get system.@system[0].hostname 2>/dev/null)
   [ -n "$NAME" ] || NAME="router-$(date +%s)"
 fi
-NAME=$(echo "$NAME" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-32)
+NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-32)
 
 echo "==> Router name: $NAME"
 
