@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-WGMAN_VER="2.9"
+WGMAN_VER="2.10"
 WG_DIR="/opt/wgman"
 STATE_DIR="$WG_DIR/state"
 CLIENTS_DIR="$STATE_DIR/clients"
@@ -45,8 +45,8 @@ wgman - WireGuard manager for OpenWrt routers
 
 Usage:
   wgman install [--host HOST] [--port PORT] [--net X.X.X] [--prefix N]
-  wgman add <name>                  create config for a PC client
-  wgman client <name>               (re)build a client config (routes to all router LANs)
+  wgman add <name> [--awg]           create config for a PC client (AmneziaWG with --awg)
+  wgman client <name>                (re)build a client config (routes to all router LANs)
   wgman routers                     list routers
   wgman list                        list all peers
   wgman ip <name>                   show the WG IP of a peer
@@ -309,28 +309,63 @@ fmt_endpoint() {
 }
 
 gen_client_conf() {
-  local name=$1 priv=$2 ip=$3
-  local srv_pub host ep lan_list="" lans l
+  local name=$1 priv=$2 ip=$3 proto=${4:-wg}
+  local srv_pub host ep _net _prefix _port lan_list="" lans l
   srv_pub=$(cat "$SERVER_PUB_FILE")
   host="$SERVER_HOST"
-  [ -n "$host" ] || host="$NET.1"
-  ep=$(fmt_endpoint "$host" "$PORT")
+  if [ "$proto" = "awg" ]; then
+    _net=$AWG_NET
+    _prefix=$AWG_PREFIX
+    _port=$AWG_PORT
+    [ -n "$host" ] || host="$AWG_NET.1"
+  else
+    _net=$NET
+    _prefix=$PREFIX
+    _port=$PORT
+    [ -n "$host" ] || host="$NET.1"
+  fi
+  ep=$(fmt_endpoint "$host" "$_port")
   lans=$(awk -F'|' '$6=="router" && $4!="" {print $4}' "$PEERS_FILE" | sort -u)
   for l in $lans; do
-    lan_list="$lan_list, $l"
+    lan_list="$lan_list, $(net_of "$l")"
   done
-  cat > "$CLIENTS_DIR/$name.conf" <<EOF
+  if [ "$proto" = "awg" ]; then
+    cat > "$CLIENTS_DIR/$name.conf" <<EOF
 [Interface]
 PrivateKey = $priv
-Address = $ip/$PREFIX
+Address = $ip/$_prefix
+DNS = $DNS1, $DNS2
+MTU = $AWG_MTU
+Jc = $AWG_JC
+Jmin = $AWG_JMIN
+Jmax = $AWG_JMAX
+S1 = $AWG_S1
+S2 = $AWG_S2
+H1 = $AWG_H1
+H2 = $AWG_H2
+H3 = $AWG_H3
+H4 = $AWG_H4
+
+[Peer]
+PublicKey = $srv_pub
+Endpoint = $ep
+AllowedIPs = $_net.0/$_prefix$lan_list
+PersistentKeepalive = 25
+EOF
+  else
+    cat > "$CLIENTS_DIR/$name.conf" <<EOF
+[Interface]
+PrivateKey = $priv
+Address = $ip/$_prefix
 DNS = $DNS1, $DNS2
 
 [Peer]
 PublicKey = $srv_pub
 Endpoint = $ep
-AllowedIPs = $NET.0/$PREFIX$lan_list
+AllowedIPs = $_net.0/$_prefix$lan_list
 PersistentKeepalive = 25
 EOF
+  fi
 }
 
 cmd_install() {
@@ -624,17 +659,24 @@ cmd_awg() {
 }
 
 cmd_add() {
-  local name="${1:-}"
-  [ -n "$name" ] || { echo "usage: wgman add <name>"; exit 1; }
-  validate_name "$name" || { echo "invalid name (use A-Za-z0-9_.-)" ; exit 1; }
+  local name="" proto="wg"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --awg) proto="awg"; shift ;;
+      *) [ -z "$name" ] && name="$1" || { echo "usage: wgman add <name> [--awg]"; exit 1; }; shift ;;
+    esac
+  done
+  [ -n "$name" ] || { echo "usage: wgman add <name> [--awg]"; exit 1; }
+  validate_name "$name" || { echo "invalid name (use A-Za-z0-9_.-)"; exit 1; }
   grep -q "^$name|" "$PEERS_FILE" && { echo "peer '$name' already exists"; exit 1; }
-  local priv pub ip
+  local priv pub ip net=$NET
+  [ "$proto" = "awg" ] && net=$AWG_NET
   priv=$(wg genkey)
   pub=$(printf '%s' "$priv" | wg pubkey)
-  ip=$(next_ip "$NET") || { echo "no free address in $NET.0/$PREFIX"; exit 1; }
-  add_peer "$name" "$pub" "$ip" "" "" "client" "wg"
-  gen_client_conf "$name" "$priv" "$ip"
-  echo "=== client config for $name ($ip) ==="
+  ip=$(next_ip "$net") || { echo "no free address in $net.0/$PREFIX"; exit 1; }
+  add_peer "$name" "$pub" "$ip" "" "" "client" "$proto"
+  gen_client_conf "$name" "$priv" "$ip" "$proto"
+  echo "=== $proto client config for $name ($ip) ==="
   cat "$CLIENTS_DIR/$name.conf"
   echo
   echo "Saved to $CLIENTS_DIR/$name.conf"
@@ -643,15 +685,16 @@ cmd_add() {
 cmd_client() {
   local name="${1:-}"
   [ -n "$name" ] || { echo "usage: wgman client <name>"; exit 1; }
-  local line fname fpub fip flan fep ftype priv
+  local line fname fpub fip flan fep ftype fproto priv
   line=$(grep "^$name|" "$PEERS_FILE" || true)
   [ -n "$line" ] || { echo "no such peer: $name"; exit 1; }
-  IFS='|' read -r fname fpub fip flan fep ftype _ <<< "$line"
+  IFS='|' read -r fname fpub fip flan fep ftype _ fproto <<< "$line"
   [ "$ftype" = "client" ] || { echo "$name is a router, not a client"; exit 1; }
+  [ -n "${fproto:-}" ] || fproto="wg"
   priv=$(sed -n 's/^PrivateKey = //p' "$CLIENTS_DIR/$name.conf" 2>/dev/null | head -n1)
   [ -n "$priv" ] || { echo "client config for $name not found on server"; exit 1; }
-  gen_client_conf "$name" "$priv" "$fip"
-  echo "=== client config for $name ==="
+  gen_client_conf "$name" "$priv" "$fip" "$fproto"
+  echo "=== $fproto client config for $name ==="
   cat "$CLIENTS_DIR/$name.conf"
   echo
   echo "Saved to $CLIENTS_DIR/$name.conf"
