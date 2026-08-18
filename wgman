@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-WGMAN_VER="2.7"
+WGMAN_VER="2.8"
 WG_DIR="/opt/wgman"
 STATE_DIR="$WG_DIR/state"
 CLIENTS_DIR="$STATE_DIR/clients"
