@@ -1,0 +1,111 @@
+# wgman — WireGuard / AmneziaWG manager for OpenWrt routers
+
+Удалённый доступ к LAN за роутером OpenWrt через VPS. Туннель роутер↔VPS на
+AmneziaWG (обфускация, устойчивость к DPI) или обычном WireGuard. Веб-интерфейс
+с авторизацией для управления клиентами, роутерами и туннелем.
+
+## Что нужно
+- **Сервер (VPS)** с публичным IP, Ubuntu 24.04 (любой systemd-Linux), root.
+- Открытые порты в фаерволе VPS: `51820/udp` (WG), `51823/udp` (AWG), `51821/tcp` (HTTPS веб-интерфейс).
+- **Роутер** на OpenWrt с выходом в интернет и root-доступом (ssh/консоль).
+- **Клиент** (ПК): AmneziaVPN или WireGuard.
+
+## 1. Сервер
+
+```sh
+# 1. Скачать свежую версию
+cd /tmp
+curl -skL -o wg.tar.gz "https://codeload.github.com/meisterleex-beep/wgman/tar.gz/refs/heads/main"
+rm -rf /tmp/wgman-main
+tar xzf wg.tar.gz
+cd /tmp/wgman-main
+
+# 2. Установить. --host = публичный IP или домен сервера (endpoint для клиентов)
+sudo bash install-wgman.sh --host 45.13.225.219
+```
+
+Скрипт:
+- устанавливает `/opt/wgman/{wgman,webui.py}`, генерирует ключи и конфиг;
+- поднимает `wg0` (WireGuard, ядерный режим) на `10.66.66.1/24`, порт `51820`;
+- запускает веб-интерфейс HTTPS на `:51821` с самоподписанным сертификатом;
+- выдаёт **API token** и **admin password** (по умолчанию password = token).
+
+В конце выводится:
+```
+Web UI: https://45.13.225.219:51821   (admin password: <пароль>)
+API URL (router registration): https://45.13.225.219:51821/register
+API token: <токен>
+```
+
+Включить AmneziaWG-туннель (userspace-режим, т.к. ядро AWG не поддержало):
+```sh
+/opt/wgman/wgman awg on
+```
+
+Сменить пароль админа (рекомендуется, по умолчанию = токен):
+```sh
+/opt/wgman/wgman passwd "СвойНадёжныйПароль"
+```
+
+Открой в браузере `https://45.13.225.219:51821` — запросит пароль.
+
+## 2. Роутер (OpenWrt)
+
+Зайди на роутер по ssh/консоли и выполни **одну** команду:
+```sh
+sh install-router.sh https://45.13.225.219:51821/register <ТОКЕН> myrouter --awg
+```
+- третий аргумент — имя роутера (латиница/цифры/`.-_`);
+- `--awg` — AmneziaWG (обфускация, DPI-устойчивость). Без флага — обычный WG;
+- скрипт сам определит LAN-подсеть роутера, сгенерирует ключи, зарегистрирует
+  пира на сервере и применит конфиг (интерфейс `awg1` или `wg0`).
+
+В конце: `=== Done ===` и `Interface: awg1 up`.
+
+> Если у нескольких роутеров одинаковые LAN-подсети (напр. все `192.168.1.0/24`),
+> включай в веб-интерфейсе только нужный (чекбокс **On** у пира) — иначе маршрут
+> будет конфликтовать.
+
+## 3. Клиент (ПК)
+
+Веб-интерфейс `https://45.13.225.219:51821` → **+ PC client** → имя, подтверди
+`OK` для AWG. Скачается `.conf`.
+
+Импорт:
+- **AmneziaVPN**: «Импорт .conf» → подключись.
+- **WireGuard**: «Добавить из файла».
+
+Результат:
+- доступ к LAN роутера (`192.168.1.0/24`) через `192.168.1.1`;
+- при полном туннеле (`AllowedIPs = 0.0.0.0/0`) — весь трафик через VPS.
+
+## 4. Проверка
+
+```sh
+# На сервере
+/opt/wgman/wgman list          # список пиров
+/opt/wgman/wgman awg status    # статус AWG
+iptables -S FORWARD             # должны быть awg0→eth0 и eth0→awg0
+
+# С ПК (в туннеле)
+ping 192.168.1.1               # роутер
+tracert 8.8.8.8                # куда идёт интернет
+```
+
+## 5. Полезные команды
+
+```sh
+/opt/wgman/wgman list                         # все пиры
+/opt/wgman/wgman routers                      # только роутеры
+/opt/wgman/wgman enable  <имя>                # включить пира (вернуть маршрут)
+/opt/wgman/wgman disable <имя>                # выключить (исключить из маршрутов)
+/opt/wgman/wgman remove  <имя>                # удалить пира
+/opt/wgman/wgman router-new <имя> [lan/cidr]  # создать роутер вручную
+/opt/wgman/wgman token new                    # сменить API-токен
+/opt/wgman/wgman awg on|off|status            # туннель AWG
+/opt/wgman/wgman passwd <пароль>              # пароль админа веб-интерфейса
+```
+
+В веб-интерфейсе доступно то же: чекбокс **On** у пира, кнопки `+ PC client` /
+`+ Router` (спрашивают WG/AWG), `AWG: enable/disable`, `Rotate API token`,
+`Set host`.
