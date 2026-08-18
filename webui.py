@@ -124,10 +124,11 @@ def parse_peers():
         parts = line.split("|")
         if len(parts) >= 7:
             proto = parts[7] if len(parts) > 7 and parts[7] else "wg"
+            enabled = parts[8] if len(parts) > 8 and parts[8] else "1"
             peers.append({
                 "name": parts[0], "pub": parts[1], "ip": parts[2],
                 "lan": parts[3], "ep": parts[4], "type": parts[5], "date": parts[6],
-                "proto": proto,
+                "proto": proto, "enabled": enabled,
             })
     return peers
 
@@ -236,13 +237,16 @@ def dashboard(handler):
             "<td class='mono'>" + proto.upper() + "</td>"
             "<td class='mono'>" + html.escape(p["ep"]) + "</td>"
             "<td>" + status + "</td>"
+            "<td><input type='checkbox' " + ("checked" if p.get("enabled") != "0" else "")
+            + " onchange='togglePeer(\"" + html.escape(p["name"], quote=True)
+            + "\",this.checked)'></td>"
             "<td>" + html.escape(p["date"]) + "</td>"
             "<td><a class='btn' href='/api/config/" + html.escape(p["name"], quote=True)
             + "' target='_blank'>config</a>"
             "<a class='btn danger' href='#' onclick='removePeer(\"" + html.escape(p["name"], quote=True)
             + "\");return false;'>del</a></td></tr>")
 
-    peer_rows = "\n".join(rows) if rows else ("<tr><td colspan='9' style='color:#8b949e'>"
+    peer_rows = "\n".join(rows) if rows else ("<tr><td colspan='10' style='color:#8b949e'>"
                                               "No peers yet. Add a PC client or register a router.</td></tr>")
 
     body = ("<h1>wgman</h1><div class='sub'>WireGuard manager for OpenWrt routers</div>"
@@ -264,7 +268,7 @@ def dashboard(handler):
             "</div>"
             "<div class='card'><h2>Peers</h2><table>"
             "<thead><tr><th>Name</th><th>WG IP</th><th>LAN</th><th>Type</th><th>Proto</th><th>Endpoint</th>"
-            "<th>Status</th><th>Added</th><th>Actions</th></tr></thead>"
+            "<th>Status</th><th>On</th><th>Added</th><th>Actions</th></tr></thead>"
             "<tbody>" + peer_rows + "</tbody></table></div>"
             "<div class='note'>To add a router automatically, run on the router itself: "
             "sh install-router.sh https://" + html.escape(fmt_endpoint(host, str(cfg.get("API_PORT", "51821"))))
@@ -292,6 +296,8 @@ def dashboard(handler):
             "async function removePeer(n){if(!confirm('Remove '+n+'?'))return;"
             "const j=await post('/api/remove',{sel:n});"
             "if(j.ok)location.reload();else alert(j.message);}"
+            "async function togglePeer(n,c){const j=await post('/api/peer_toggle',{name:n,enabled:c});"
+            "if(!j.ok)alert(j.message);location.reload();}"
             "async function rotateToken(){if(!confirm('Rotate API token? confirm in browser.'))return;"
             "const j=await post('/api/token',{action:'new'});"
             "if(j.ok)alert('New API token: '+j.token);else alert(j.message);}"
@@ -422,6 +428,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/remove":
             rc, out, err = run_wgman(["remove", str(data.get("sel") or "").strip()])
+            send_json(self, 200 if rc == 0 else 400,
+                      {"ok": rc == 0, "message": (err or out)})
+            return
+        if path == "/api/peer_toggle":
+            name = str(data.get("name") or "").strip()
+            enabled = 1 if data.get("enabled") else 0
+            rc, out, err = run_wgman(["enable" if enabled else "disable", name])
             send_json(self, 200 if rc == 0 else 400,
                       {"ok": rc == 0, "message": (err or out)})
             return

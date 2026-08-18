@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-WGMAN_VER="2.13"
+WGMAN_VER="2.14"
 WG_DIR="/opt/wgman"
 STATE_DIR="$WG_DIR/state"
 CLIENTS_DIR="$STATE_DIR/clients"
@@ -57,6 +57,8 @@ Usage:
   wgman router-new <name> [lan]     create a router peer + generate its config
   wgman config <name>               print the config of a client or router
   wgman awg <on|off|status>         enable/disable the AmneziaWG tunnel (awg0)
+  wgman enable <name>               enable a peer (route it again, resolves LAN conflicts)
+  wgman disable <name>              disable a peer (exclude its routes)
 EOF
 }
 
@@ -135,9 +137,10 @@ write_wg_conf() {
     echo "PostDown = iptables -D FORWARD -i wg0 -o wg0 -j ACCEPT"
     echo "PostDown = iptables -D FORWARD -i wg0 -o $main_iface -j ACCEPT"
     echo "PostDown = iptables -D FORWARD -i $main_iface -o wg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-    while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+    while IFS='|' read -r pname ppub pip plan pep ptype _ proto pen _; do
       [ -z "$pname" ] && continue
       [ "$proto" = "awg" ] && continue
+      [ "$pen" = "0" ] && continue
       echo ""
       echo "[Peer]"
       echo "PublicKey = $ppub"
@@ -163,18 +166,20 @@ write_awg_up() {
       echo 'ip link del awgtest 2>/dev/null || true'
       echo 'ip link show awg0 >/dev/null 2>&1 || ip link add dev awg0 type amneziawg'
       echo "awg set awg0 listen-port $AWG_PORT private-key <(printf '%s' '$server_key') jc $AWG_JC jmin $AWG_JMIN jmax $AWG_JMAX s1 $AWG_S1 s2 $AWG_S2 h1 $AWG_H1 h2 $AWG_H2 h3 $AWG_H3 h4 $AWG_H4"
-      while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+      while IFS='|' read -r pname ppub pip plan pep ptype _ proto pen _; do
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
+        [ "$pen" = "0" ] && continue
         ai="$pip/32"
         [ -n "$plan" ] && ai="$pip/32, $(net_of "$plan")"
         echo "awg set awg0 peer '$ppub' allowed-ips '$ai' persistent-keepalive 25"
       done < "$PEERS_FILE"
       echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
       echo "ip link set dev awg0 up"
-      while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+      while IFS='|' read -r pname ppub pip plan pep ptype _ proto pen _; do
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
+        [ "$pen" = "0" ] && continue
         echo "ip route replace $pip/32 dev awg0"
         [ -n "$plan" ] && echo "ip route replace $(net_of "$plan") dev awg0"
       done < "$PEERS_FILE"
@@ -188,18 +193,20 @@ write_awg_up() {
       echo 'for i in $(seq 1 20); do [ -S "$SOCK" ] && break; sleep 1; done'
       echo '[ -S "$SOCK" ] || { echo "amneziawg-go UAPI socket not ready"; exit 1; }'
       echo "awg set awg0 listen-port $AWG_PORT private-key <(printf '%s' '$server_key') jc $AWG_JC jmin $AWG_JMIN jmax $AWG_JMAX s1 $AWG_S1 s2 $AWG_S2 h1 $AWG_H1 h2 $AWG_H2 h3 $AWG_H3 h4 $AWG_H4"
-      while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+      while IFS='|' read -r pname ppub pip plan pep ptype _ proto pen _; do
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
+        [ "$pen" = "0" ] && continue
         ai="$pip/32"
         [ -n "$plan" ] && ai="$pip/32, $(net_of "$plan")"
         echo "awg set awg0 peer '$ppub' allowed-ips '$ai' persistent-keepalive 25"
       done < "$PEERS_FILE"
       echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
       echo "ip link set dev awg0 up"
-      while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+      while IFS='|' read -r pname ppub pip plan pep ptype _ proto pen _; do
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
+        [ "$pen" = "0" ] && continue
         echo "ip route replace $pip/32 dev awg0"
         [ -n "$plan" ] && echo "ip route replace $(net_of "$plan") dev awg0"
       done < "$PEERS_FILE"
@@ -298,7 +305,7 @@ reload() {
 
 add_peer() {
   local name=$1 pub=$2 ip=$3 lan=$4 ep=$5 type=$6 proto=$7
-  echo "$name|$pub|$ip|$lan|$ep|$type|$(date +%F)|$proto" >> "$PEERS_FILE"
+  echo "$name|$pub|$ip|$lan|$ep|$type|$(date +%F)|$proto|1" >> "$PEERS_FILE"
   reload
 }
 
@@ -737,15 +744,15 @@ cmd_remove() {
 
 cmd_list() {
   printf '%-18s %-14s %-18s %-22s %s\n' NAME IP LAN ENDPOINT TYPE
-  while IFS='|' read -r n p ip lan ep ty _; do
-    [ -n "$n" ] && printf '%-18s %-14s %-18s %-22s %s\n' "$n" "$ip" "$lan" "$ep" "$ty"
+  while IFS='|' read -r n p ip lan ep ty _ en; do
+    [ -n "$n" ] && printf '%-18s %-14s %-18s %-22s %s\n' "$n" "$ip" "$lan" "$ep" "$ty$([ "$en" = "0" ] && echo " (off)")"
   done < "$PEERS_FILE"
 }
 
 cmd_routers() {
-  printf '%-18s %-14s %-18s %s\n' NAME IP LAN REGISTERED
-  while IFS='|' read -r n p ip lan ep ty d; do
-    [ -n "$n" ] && [ "$ty" = "router" ] && printf '%-18s %-14s %-18s %s\n' "$n" "$ip" "$lan" "$d"
+  printf '%-18s %-14s %-18s %s %s\n' NAME IP LAN REGISTERED STATE
+  while IFS='|' read -r n p ip lan ep ty d en; do
+    [ -n "$n" ] && [ "$ty" = "router" ] && printf '%-18s %-14s %-18s %s %s\n' "$n" "$ip" "$lan" "$d" "$([ "$en" = "0" ] && echo off || echo on)"
   done < "$PEERS_FILE"
 }
 
@@ -766,6 +773,17 @@ cmd_host() {
   echo "Regenerate client configs with: wgman client <name>"
 }
 
+cmd_peer_set() {
+  local name="${1:-}" val="${2:-}"
+  [ -n "$name" ] || { echo "usage: wgman <enable|disable> <name>"; exit 1; }
+  case "$val" in 1|0) ;; *) echo "usage: wgman <enable|disable> <name>"; exit 1 ;; esac
+  [ "$(id -u)" = "0" ] || { echo "ERROR: run as root"; exit 1; }
+  grep -q "^$name|" "$PEERS_FILE" || { echo "no such peer: $name"; exit 1; }
+  awk -F'|' -v n="$name" -v v="$val" 'BEGIN{OFS="|"} $1==n {if ($9=="") $9=1; $9=v} {print}' "$PEERS_FILE" > "$PEERS_FILE.tmp" && mv "$PEERS_FILE.tmp" "$PEERS_FILE"
+  reload
+  echo "$name: $([ "$val" = "1" ] && echo enabled || echo disabled)"
+}
+
 cmd_register() {
   local name="${1:-}" pub="${2:-}" lan="${3:-}" ep="${4:-}" proto="${5:-wg}"
   validate_name "$name" || { echo "invalid name"; exit 1; }
@@ -782,7 +800,7 @@ cmd_register() {
   existing=$(grep "^$name|" "$PEERS_FILE" || true)
   if [ -n "$existing" ]; then
     ip=$(printf '%s' "$existing" | cut -d'|' -f3)
-    sed -i "/^$name|/c\\$name|$pub|$ip|$lan|$ep|router|$(date +%F)|$proto" "$PEERS_FILE"
+    awk -F'|' -v n="$name" -v p="$pub" -v i="$ip" -v l="$lan" -v e="$ep" -v t="router" -v d="$(date +%F)" -v pr="$proto" 'BEGIN{OFS="|"} $1==n {$2=p; $3=i; $4=l; $5=e; $6=t; $7=d; $8=pr; if ($9=="") $9=1} {print}' "$PEERS_FILE" > "$PEERS_FILE.tmp" && mv "$PEERS_FILE.tmp" "$PEERS_FILE"
     reload
   else
     ip=$(next_ip "$net") || { echo "no free address in $net.0/$PREFIX"; exit 1; }
@@ -881,6 +899,8 @@ case "${1:-}" in
   token) shift; cmd_token "$@" ;;
   host) shift; cmd_host "$@" ;;
   awg) shift; cmd_awg "$@" ;;
+  enable) shift; cmd_peer_set "$@" 1 ;;
+  disable) shift; cmd_peer_set "$@" 0 ;;
   _register) shift; cmd_register "$@" ;;
   help|-h|--help) usage ;;
   *) usage; exit 1 ;;
