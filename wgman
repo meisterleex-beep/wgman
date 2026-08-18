@@ -1,0 +1,471 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+WG_DIR="/opt/wgman"
+STATE_DIR="$WG_DIR/state"
+CLIENTS_DIR="$STATE_DIR/clients"
+PEERS_FILE="$STATE_DIR/peers"
+TOKEN_FILE="$STATE_DIR/token"
+CONFIG_FILE="$STATE_DIR/config"
+CONF="/etc/wireguard/wg0.conf"
+SERVER_KEY_FILE="/etc/wireguard/server.key"
+SERVER_PUB_FILE="/etc/wireguard/server.pub"
+
+NET="10.66.66"
+PREFIX="24"
+PORT="51820"
+API_PORT="51821"
+DNS1="1.1.1.1"
+DNS2="8.8.8.8"
+SERVER_HOST=""
+
+usage() {
+  cat <<'EOF'
+wgman - WireGuard manager for OpenWrt routers
+
+Usage:
+  wgman install [--host HOST] [--port PORT] [--net X.X.X] [--prefix N]
+  wgman add <name>                  create config for a PC client
+  wgman client <name>               (re)build a client config (routes to all router LANs)
+  wgman routers                     list routers
+  wgman list                        list all peers
+  wgman ip <name>                   show the WG IP of a peer
+  wgman remove <name|ip>            remove a peer
+  wgman token [new]                 show or rotate the API token
+  wgman host <host>                 set public endpoint host of the server
+  wgman router <name>               show peer info for a router
+  wgman router-new <name> [lan]     create a router peer + generate its config
+  wgman config <name>               print the config of a client or router
+EOF
+}
+
+load_config() {
+  if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+  fi
+}
+
+detect_main_iface() {
+  local iface
+  iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+  if [ -z "$iface" ]; then
+    iface=$(ip -o -4 addr show 2>/dev/null | awk '$2 != "lo" {print $2; exit}')
+  fi
+  echo "$iface"
+}
+
+next_ip() {
+  local i used
+  used=$(awk -F'|' 'NF {print $3}' "$PEERS_FILE" 2>/dev/null)
+  for i in $(seq 2 254); do
+    if ! grep -qx "$NET.$i" <<< "$used"; then
+      echo "$NET.$i"
+      return 0
+    fi
+  done
+  return 1
+}
+
+write_conf() {
+  local main_iface server_key
+  main_iface=$(detect_main_iface)
+  server_key=$(cat "$SERVER_KEY_FILE")
+  {
+    echo "[Interface]"
+    echo "Address = $NET.1/$PREFIX"
+    echo "ListenPort = $PORT"
+    echo "PrivateKey = $server_key"
+    echo "PostUp = iptables -t nat -A POSTROUTING -s $NET.0/$PREFIX -o $main_iface -j MASQUERADE"
+    echo "PostUp = iptables -I INPUT -i wg0 -j ACCEPT"
+    echo "PostUp = iptables -I FORWARD -i wg0 -o wg0 -j ACCEPT"
+    echo "PostDown = iptables -D INPUT -i wg0 -j ACCEPT"
+    echo "PostDown = iptables -D FORWARD -i wg0 -o wg0 -j ACCEPT"
+    while IFS='|' read -r pname ppub pip plan pep ptype _; do
+      [ -z "$pname" ] && continue
+      echo ""
+      echo "[Peer]"
+      echo "PublicKey = $ppub"
+      if [ -n "$plan" ]; then
+        echo "AllowedIPs = $pip/32, $plan"
+      else
+        echo "AllowedIPs = $pip/32"
+      fi
+      [ -n "$pep" ] && echo "Endpoint = $pep"
+      echo "PersistentKeepalive = 25"
+    done < "$PEERS_FILE"
+  } > "$CONF"
+}
+
+reload() {
+  write_conf
+  wg-quick down wg0 2>/dev/null || true
+  wg-quick up wg0
+}
+
+add_peer() {
+  local name=$1 pub=$2 ip=$3 lan=$4 ep=$5 type=$6
+  echo "$name|$pub|$ip|$lan|$ep|$type|$(date +%F)" >> "$PEERS_FILE"
+  reload
+}
+
+validate_name() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_.-]*|.*|..|*' '*) return 1 ;;
+  esac
+  [ ${#1} -le 32 ]
+}
+
+fmt_endpoint() {
+  local h=$1 p=$2
+  case "$h" in
+    \[*\]) echo "$h:$p" ;;
+    *:*) echo "[$h]:$p" ;;
+    *) echo "$h:$p" ;;
+  esac
+}
+
+gen_client_conf() {
+  local name=$1 priv=$2 ip=$3
+  local srv_pub host ep lan_list="" lans l
+  srv_pub=$(cat "$SERVER_PUB_FILE")
+  host="$SERVER_HOST"
+  [ -n "$host" ] || host="$NET.1"
+  ep=$(fmt_endpoint "$host" "$PORT")
+  lans=$(awk -F'|' '$6=="router" && $4!="" {print $4}' "$PEERS_FILE" | sort -u)
+  for l in $lans; do
+    lan_list="$lan_list, $l"
+  done
+  cat > "$CLIENTS_DIR/$name.conf" <<EOF
+[Interface]
+PrivateKey = $priv
+Address = $ip/$PREFIX
+DNS = $DNS1, $DNS2
+
+[Peer]
+PublicKey = $srv_pub
+Endpoint = $ep
+AllowedIPs = $NET.0/$PREFIX$lan_list
+PersistentKeepalive = 25
+EOF
+}
+
+cmd_install() {
+  [ "$(id -u)" = "0" ] || { echo "ERROR: run as root"; exit 1; }
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --host) SERVER_HOST="$2"; shift 2 ;;
+      --port) PORT="$2"; shift 2 ;;
+      --net) NET="$2"; shift 2 ;;
+      --prefix) PREFIX="$2"; shift 2 ;;
+      *) echo "unknown option: $1"; exit 1 ;;
+    esac
+  done
+
+  mkdir -p "$STATE_DIR" "$CLIENTS_DIR" "$STATE_DIR/configs"
+  touch "$PEERS_FILE"
+
+  echo "==> Installing packages..."
+  apt-get update -y
+  apt-get install -y wireguard-tools openssl iptables python3 curl
+
+  echo "==> Enabling IP forwarding..."
+  sysctl -w net.ipv4.ip_forward=1
+  grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+
+  if [ ! -f "$SERVER_KEY_FILE" ]; then
+    echo "==> Generating server keys..."
+    umask 077
+    wg genkey > "$SERVER_KEY_FILE"
+    wg pubkey < "$SERVER_KEY_FILE" > "$SERVER_PUB_FILE"
+  fi
+
+  if [ -z "$SERVER_HOST" ]; then
+    echo "==> Detecting public IPv4..."
+    SERVER_HOST=$(curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null || true)
+    [ -z "$SERVER_HOST" ] && SERVER_HOST=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
+    [ -z "$SERVER_HOST" ] && SERVER_HOST=$(curl -4 -s --max-time 5 https://icanhazip.com 2>/dev/null || true)
+    if [ -z "$SERVER_HOST" ]; then
+      SERVER_HOST=$(ip -o -4 addr show "$(detect_main_iface)" 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+    fi
+  fi
+
+  cat > "$CONFIG_FILE" <<EOF
+NET=$NET
+PREFIX=$PREFIX
+PORT=$PORT
+API_PORT=$API_PORT
+DNS1=$DNS1
+DNS2=$DNS2
+SERVER_HOST=$SERVER_HOST
+EOF
+
+  if [ ! -f "$TOKEN_FILE" ]; then
+    umask 077
+    openssl rand -hex 24 > "$TOKEN_FILE"
+  fi
+
+  ADMIN_PASS="${ADMIN_PASS:-$(cat "$TOKEN_FILE")}"
+  if grep -q '^ADMIN_PASS=' "$CONFIG_FILE"; then
+    sed -i "s/^ADMIN_PASS=.*/ADMIN_PASS=$ADMIN_PASS/" "$CONFIG_FILE"
+  else
+    echo "ADMIN_PASS=$ADMIN_PASS" >> "$CONFIG_FILE"
+  fi
+
+  mkdir -p /etc/wireguard
+  write_conf
+  echo "==> Starting wg-quick@wg0..."
+  wg-quick down wg0 2>/dev/null || true
+  wg-quick up wg0 || { echo "ERROR: wg-quick up failed. On older kernels install linux-modules-extra-$(uname -r)."; exit 1; }
+  systemctl enable wg-quick@wg0 >/dev/null 2>&1 || true
+
+  cmd_install_api
+  cmd_install_firewall
+
+  local ep_end ep_api
+  ep_end=$(fmt_endpoint "$SERVER_HOST" "$PORT")
+  ep_api=$(fmt_endpoint "$SERVER_HOST" "$API_PORT")
+
+  cat <<EOF
+
+=== wgman installed ===
+Server public key: $(cat "$SERVER_PUB_FILE")
+WireGuard network: $NET.1/$PREFIX   port: $PORT/udp
+Endpoint (for clients): $ep_end
+Web UI: https://$ep_api    (admin password: $ADMIN_PASS)
+API URL (router registration): https://$ep_api/register
+API token: $(cat "$TOKEN_FILE")
+
+On an OpenWrt router, run one command:
+  sh install-router.sh https://$ep_api/register $(cat "$TOKEN_FILE") router-name
+EOF
+}
+
+cmd_install_api() {
+  local cert="$STATE_DIR/server.crt" key="$STATE_DIR/server.key"
+  if [ -f "$(dirname "$0")/webui.py" ]; then
+    cp "$(dirname "$0")/webui.py" "$WG_DIR/webui.py"
+  fi
+  [ -f "$WG_DIR/webui.py" ] || { echo "ERROR: webui.py not found next to wgman"; exit 1; }
+  python3 -m py_compile "$WG_DIR/webui.py" || { echo "ERROR: webui.py syntax error"; exit 1; }
+  if [ ! -f "$cert" ] || [ ! -f "$key" ]; then
+    echo "==> Generating self-signed certificate for API..."
+    openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 3650 -nodes \
+      -subj "/CN=$SERVER_HOST" \
+      -addext "subjectAltName=DNS:$SERVER_HOST,IP:$SERVER_HOST,IP:127.0.0.1" 2>/dev/null \
+      || openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 3650 -nodes -subj "/CN=$SERVER_HOST"
+    chmod 600 "$key"
+  fi
+  cat > /etc/systemd/system/wgman-api.service <<EOF
+[Unit]
+Description=wgman web UI and registration API
+After=network.target
+[Service]
+ExecStart=/usr/bin/python3 $WG_DIR/webui.py
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now wgman-api.service >/dev/null 2>&1 || true
+  echo "==> wgman-api.service started"
+}
+
+cmd_install_firewall() {
+  cat > "$WG_DIR/firewall.sh" <<'SH'
+#!/usr/bin/env bash
+set -e
+. /opt/wgman/state/config
+iptables -C INPUT -p udp --dport "$PORT" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$PORT" -j ACCEPT
+iptables -C INPUT -p tcp --dport "$API_PORT" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$API_PORT" -j ACCEPT
+SH
+  chmod +x "$WG_DIR/firewall.sh"
+  cat > /etc/systemd/system/wgman-firewall.service <<EOF
+[Unit]
+Description=wgman firewall rules
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=$WG_DIR/firewall.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now wgman-firewall.service >/dev/null 2>&1 || true
+  echo "==> firewall rules applied"
+}
+
+cmd_add() {
+  local name="${1:-}"
+  [ -n "$name" ] || { echo "usage: wgman add <name>"; exit 1; }
+  validate_name "$name" || { echo "invalid name (use A-Za-z0-9_.-)" ; exit 1; }
+  grep -q "^$name|" "$PEERS_FILE" && { echo "peer '$name' already exists"; exit 1; }
+  local priv pub ip
+  priv=$(wg genkey)
+  pub=$(printf '%s' "$priv" | wg pubkey)
+  ip=$(next_ip) || { echo "no free address in $NET.0/$PREFIX"; exit 1; }
+  add_peer "$name" "$pub" "$ip" "" "" "client"
+  gen_client_conf "$name" "$priv" "$ip"
+  echo "=== client config for $name ($ip) ==="
+  cat "$CLIENTS_DIR/$name.conf"
+  echo
+  echo "Saved to $CLIENTS_DIR/$name.conf"
+}
+
+cmd_client() {
+  local name="${1:-}"
+  [ -n "$name" ] || { echo "usage: wgman client <name>"; exit 1; }
+  local line fname fpub fip flan fep ftype priv
+  line=$(grep "^$name|" "$PEERS_FILE" || true)
+  [ -n "$line" ] || { echo "no such peer: $name"; exit 1; }
+  IFS='|' read -r fname fpub fip flan fep ftype _ <<< "$line"
+  [ "$ftype" = "client" ] || { echo "$name is a router, not a client"; exit 1; }
+  priv=$(sed -n 's/^PrivateKey = //p' "$CLIENTS_DIR/$name.conf" 2>/dev/null | head -n1)
+  [ -n "$priv" ] || { echo "client config for $name not found on server"; exit 1; }
+  gen_client_conf "$name" "$priv" "$fip"
+  echo "=== client config for $name ==="
+  cat "$CLIENTS_DIR/$name.conf"
+  echo
+  echo "Saved to $CLIENTS_DIR/$name.conf"
+}
+
+cmd_ip() {
+  local name="${1:-}"
+  [ -n "$name" ] || { echo "usage: wgman ip <name>"; exit 1; }
+  awk -F'|' -v n="$name" '$1==n {print $3; exit}' "$PEERS_FILE"
+}
+
+cmd_router() {
+  local name="${1:-}"
+  [ -n "$name" ] || { echo "usage: wgman router <name>"; exit 1; }
+  awk -F'|' -v n="$name" '$1==n {printf "name=%s\nip=%s\nlan=%s\nendpoint=%s\ntype=%s\n",$1,$3,$4,$5,$6}' "$PEERS_FILE"
+}
+
+cmd_remove() {
+  local sel="${1:-}"
+  [ -n "$sel" ] || { echo "usage: wgman remove <name|ip>"; exit 1; }
+  if ! grep -Eq "^$sel|" "$PEERS_FILE" && ! grep -Eq "\\|$sel\\|" "$PEERS_FILE"; then
+    echo "no such peer: $sel"
+    exit 1
+  fi
+  sed -i "/^$sel|/d; /|$sel|/d" "$PEERS_FILE"
+  rm -f "$CLIENTS_DIR/$sel.conf" "$STATE_DIR/configs/$sel.conf"
+  reload
+  echo "removed: $sel"
+}
+
+cmd_list() {
+  printf '%-18s %-14s %-18s %-22s %s\n' NAME IP LAN ENDPOINT TYPE
+  while IFS='|' read -r n p ip lan ep ty _; do
+    [ -n "$n" ] && printf '%-18s %-14s %-18s %-22s %s\n' "$n" "$ip" "$lan" "$ep" "$ty"
+  done < "$PEERS_FILE"
+}
+
+cmd_routers() {
+  printf '%-18s %-14s %-18s %s\n' NAME IP LAN REGISTERED
+  while IFS='|' read -r n p ip lan ep ty d; do
+    [ -n "$n" ] && [ "$ty" = "router" ] && printf '%-18s %-14s %-18s %s\n' "$n" "$ip" "$lan" "$d"
+  done < "$PEERS_FILE"
+}
+
+cmd_token() {
+  if [ "${1:-}" = "new" ]; then
+    umask 077
+    openssl rand -hex 24 > "$TOKEN_FILE"
+    echo "new token generated"
+  fi
+  cat "$TOKEN_FILE"
+}
+
+cmd_host() {
+  local host="${1:-}"
+  [ -n "$host" ] || { echo "usage: wgman host <hostname-or-ip>"; exit 1; }
+  sed -i "s/^SERVER_HOST=.*/SERVER_HOST=$host/" "$CONFIG_FILE"
+  echo "SERVER_HOST set to $host"
+  echo "Regenerate client configs with: wgman client <name>"
+}
+
+cmd_register() {
+  local name="${1:-}" pub="${2:-}" lan="${3:-}" ep="${4:-}"
+  validate_name "$name" || { echo "invalid name"; exit 1; }
+  case "$pub" in
+    *[!A-Za-z0-9+/]*|'' ) echo "invalid public key"; exit 1 ;;
+  esac
+  [ ${#pub} -eq 44 ] || { echo "invalid public key length"; exit 1; }
+  grep -q "^$name|" "$PEERS_FILE" && { echo "peer '$name' already exists"; exit 1; }
+  local ip
+  ip=$(next_ip) || { echo "no free address in $NET.0/$PREFIX"; exit 1; }
+  if [ -n "$lan" ]; then
+    awk -F'|' -v l="$lan" '$4==l && $6=="router" {print "WARNING: LAN " l " already used by " $1}' "$PEERS_FILE"
+  fi
+  add_peer "$name" "$pub" "$ip" "$lan" "$ep" "router"
+  echo "OK $ip"
+}
+
+cmd_router_new() {
+  local name="${1:-}" lan="${2:-}"
+  [ -n "$name" ] || { echo "usage: wgman router-new <name> [lan_cidr]"; exit 1; }
+  validate_name "$name" || { echo "invalid name (use A-Za-z0-9_.-)"; exit 1; }
+  grep -q "^$name|" "$PEERS_FILE" && { echo "peer '$name' already exists"; exit 1; }
+  local priv pub ip srv_pub host
+  priv=$(wg genkey)
+  pub=$(printf '%s' "$priv" | wg pubkey)
+  ip=$(next_ip) || { echo "no free address in $NET.0/$PREFIX"; exit 1; }
+  if [ -n "$lan" ]; then
+    awk -F'|' -v l="$lan" '$4==l && $6=="router" {print "WARNING: LAN " l " already used by " $1}' "$PEERS_FILE"
+  fi
+  add_peer "$name" "$pub" "$ip" "$lan" "" "router"
+  srv_pub=$(cat "$SERVER_PUB_FILE")
+  host="$SERVER_HOST"
+  [ -n "$host" ] || host="$NET.1"
+  ep=$(fmt_endpoint "$host" "$PORT")
+  mkdir -p "$STATE_DIR/configs"
+  cat > "$STATE_DIR/configs/$name.conf" <<EOF
+[Interface]
+PrivateKey = $priv
+Address = $ip/$PREFIX
+DNS = $DNS1, $DNS2
+
+[Peer]
+PublicKey = $srv_pub
+Endpoint = $ep
+AllowedIPs = $NET.0/$PREFIX
+PersistentKeepalive = 25
+EOF
+  echo "OK $ip"
+  echo "conf: $STATE_DIR/configs/$name.conf"
+}
+
+cmd_config() {
+  local name="${1:-}" ftype
+  [ -n "$name" ] || { echo "usage: wgman config <name>"; exit 1; }
+  ftype=$(awk -F'|' -v n="$name" '$1==n {print $6}' "$PEERS_FILE")
+  case "$ftype" in
+    client) cat "$CLIENTS_DIR/$name.conf" ;;
+    router) cat "$STATE_DIR/configs/$name.conf" ;;
+    *) echo "no such peer: $name"; exit 1 ;;
+  esac
+}
+
+load_config
+
+case "${1:-}" in
+  install) shift; cmd_install "$@" ;;
+  add) shift; cmd_add "$@" ;;
+  client) shift; cmd_client "$@" ;;
+  list) shift; cmd_list ;;
+  routers) shift; cmd_routers ;;
+  ip) shift; cmd_ip "$@" ;;
+  router) shift; cmd_router "$@" ;;
+  router-new) shift; cmd_router_new "$@" ;;
+  config) shift; cmd_config "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  token) shift; cmd_token "$@" ;;
+  host) shift; cmd_host "$@" ;;
+  _register) shift; cmd_register "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac
