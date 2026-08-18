@@ -153,6 +153,18 @@ write_awg_up() {
       done < "$PEERS_FILE"
       echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
       echo "ip link set dev awg0 up"
+      while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+        [ -z "$pname" ] && continue
+        [ "$proto" = "awg" ] || continue
+        echo "ip route replace $pip/32 dev awg0"
+        [ -n "$plan" ] && echo "ip route replace $plan dev awg0"
+      done < "$PEERS_FILE"
+    while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+      [ -z "$pname" ] && continue
+      [ "$proto" = "awg" ] || continue
+      echo "ip route replace $pip/32 dev awg0"
+      [ -n "$plan" ] && echo "ip route replace $plan dev awg0"
+    done < "$PEERS_FILE"
       echo "iptables -C INPUT -p udp --dport $AWG_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $AWG_PORT -j ACCEPT"
     } > "$AWG_UP"
   else
@@ -172,6 +184,18 @@ write_awg_up() {
       done < "$PEERS_FILE"
       echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
       echo "ip link set dev awg0 up"
+      while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+        [ -z "$pname" ] && continue
+        [ "$proto" = "awg" ] || continue
+        echo "ip route replace $pip/32 dev awg0"
+        [ -n "$plan" ] && echo "ip route replace $plan dev awg0"
+      done < "$PEERS_FILE"
+    while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+      [ -z "$pname" ] && continue
+      [ "$proto" = "awg" ] || continue
+      echo "ip route replace $pip/32 dev awg0"
+      [ -n "$plan" ] && echo "ip route replace $plan dev awg0"
+    done < "$PEERS_FILE"
       echo "iptables -C INPUT -p udp --dport $AWG_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $AWG_PORT -j ACCEPT"
       echo "iptables -C INPUT -i awg0 -j ACCEPT 2>/dev/null || iptables -I INPUT -i awg0 -j ACCEPT"
       echo "iptables -C FORWARD -i awg0 -o awg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -o awg0 -j ACCEPT"
@@ -223,6 +247,12 @@ write_awg_run() {
     done < "$PEERS_FILE"
     echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
     echo "ip link set dev awg0 up"
+    while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+      [ -z "$pname" ] && continue
+      [ "$proto" = "awg" ] || continue
+      echo "ip route replace $pip/32 dev awg0"
+      [ -n "$plan" ] && echo "ip route replace $plan dev awg0"
+    done < "$PEERS_FILE"
     echo "iptables -C INPUT -p udp --dport $AWG_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $AWG_PORT -j ACCEPT"
     echo "iptables -C INPUT -i awg0 -j ACCEPT 2>/dev/null || iptables -I INPUT -i awg0 -j ACCEPT"
     echo "iptables -C FORWARD -i awg0 -o awg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -o awg0 -j ACCEPT"
