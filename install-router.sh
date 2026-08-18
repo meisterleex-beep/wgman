@@ -34,7 +34,7 @@ fi
 NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-32)
 
 echo "==> Router name: $NAME"
-echo "==> install-router.sh version: 2.2 (universal)"
+echo "==> install-router.sh version: 2.3 (universal)"
 
 mask2bits() {
   local m=$1 bits=0 o oifs
@@ -179,10 +179,10 @@ if [ -z "$LAN_ZONE" ]; then
   LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.network='lan'" | sed "s/\.network.*//" | head -n1)
 fi
 if [ -n "$LAN_ZONE" ]; then
-  CUR=$(uci -q get firewall.$LAN_ZONE.network 2>/dev/null)
+  CUR=$(uci -q get "$LAN_ZONE.network" 2>/dev/null)
   case " $CUR " in
     *" wg0 "*) echo "==> wg0 already in lan zone" ;;
-    *) uci_run add_list firewall.$LAN_ZONE.network=wg0 ;;
+    *) uci_run add_list "$LAN_ZONE.network=wg0" ;;
   esac
 else
   echo "WARNING: lan firewall zone not found, wg0 not added to it"
