@@ -142,7 +142,7 @@ write_awg_up() {
       echo 'set -e'
       echo 'ip link del awgtest 2>/dev/null || true'
       echo 'ip link show awg0 >/dev/null 2>&1 || ip link add dev awg0 type amneziawg'
-      echo "awg set awg0 listen-port $AWG_PORT private-key <(printf '%s' '$server_key') awg-jc $AWG_JC awg-jmin $AWG_JMIN awg-jmax $AWG_JMAX awg-s1 $AWG_S1 awg-s2 $AWG_S2 awg-h1 $AWG_H1 awg-h2 $AWG_H2 awg-h3 $AWG_H3 awg-h4 $AWG_H4"
+      echo "awg set awg0 listen-port $AWG_PORT private-key <(printf '%s' '$server_key') jc $AWG_JC jmin $AWG_JMIN jmax $AWG_JMAX s1 $AWG_S1 s2 $AWG_S2 h1 $AWG_H1 h2 $AWG_H2 h3 $AWG_H3 h4 $AWG_H4"
       while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
@@ -161,7 +161,7 @@ write_awg_up() {
       echo 'SOCK=/var/run/amneziawg/awg0.sock'
       echo 'for i in $(seq 1 20); do [ -S "$SOCK" ] && break; sleep 1; done'
       echo '[ -S "$SOCK" ] || { echo "amneziawg-go UAPI socket not ready"; exit 1; }'
-      echo "awg set awg0 listen-port $AWG_PORT private-key <(printf '%s' '$server_key') awg-jc $AWG_JC awg-jmin $AWG_JMIN awg-jmax $AWG_JMAX awg-s1 $AWG_S1 awg-s2 $AWG_S2 awg-h1 $AWG_H1 awg-h2 $AWG_H2 awg-h3 $AWG_H3 awg-h4 $AWG_H4"
+      echo "awg set awg0 listen-port $AWG_PORT private-key <(printf '%s' '$server_key') jc $AWG_JC jmin $AWG_JMIN jmax $AWG_JMAX s1 $AWG_S1 s2 $AWG_S2 h1 $AWG_H1 h2 $AWG_H2 h3 $AWG_H3 h4 $AWG_H4"
       while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
         [ -z "$pname" ] && continue
         [ "$proto" = "awg" ] || continue
@@ -212,7 +212,7 @@ write_awg_run() {
     echo 'trap cleanup TERM INT EXIT'
     echo 'for i in $(seq 1 30); do [ -S /var/run/amneziawg/awg0.sock ] && break; sleep 1; done'
     echo '[ -S /var/run/amneziawg/awg0.sock ] || { echo "amneziawg-go failed to create UAPI socket"; exit 1; }'
-    echo "awg set awg0 listen-port $AWG_PORT private-key <(printf '%s' '$server_key') awg-jc $AWG_JC awg-jmin $AWG_JMIN awg-jmax $AWG_JMAX awg-s1 $AWG_S1 awg-s2 $AWG_S2 awg-h1 $AWG_H1 awg-h2 $AWG_H2 awg-h3 $AWG_H3 awg-h4 $AWG_H4"
+    echo "awg set awg0 listen-port $AWG_PORT private-key <(printf '%s' '$server_key') jc $AWG_JC jmin $AWG_JMIN jmax $AWG_JMAX s1 $AWG_S1 s2 $AWG_S2 h1 $AWG_H1 h2 $AWG_H2 h3 $AWG_H3 h4 $AWG_H4"
     while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
       [ -z "$pname" ] && continue
       [ "$proto" = "awg" ] || continue
