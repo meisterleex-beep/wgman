@@ -174,12 +174,15 @@ cmd_install() {
   sysctl -w net.ipv4.ip_forward=1
   grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
 
+  mkdir -p /etc/wireguard
+
   if [ ! -f "$SERVER_KEY_FILE" ]; then
     echo "==> Generating server keys..."
     umask 077
     wg genkey > "$SERVER_KEY_FILE"
     wg pubkey < "$SERVER_KEY_FILE" > "$SERVER_PUB_FILE"
   fi
+  [ -s "$SERVER_KEY_FILE" ] || { echo "ERROR: failed to create server key"; exit 1; }
 
   if [ -z "$SERVER_HOST" ]; then
     echo "==> Detecting public IPv4..."
