@@ -399,7 +399,7 @@ cmd_register() {
   esac
   [ ${#pub} -eq 44 ] || { echo "invalid public key length"; exit 1; }
   if [ -n "$lan" ]; then
-    awk -F'|' -v l="$lan" '$4==l && $6=="router" {print "WARNING: LAN " l " already used by " $1}' "$PEERS_FILE"
+    awk -F'|' -v n="$name" -v l="$lan" '$1!=n && $4==l && $6=="router" {print "WARNING: LAN " l " already used by " $1 > "/dev/stderr"}' "$PEERS_FILE"
   fi
   local ip existing
   existing=$(grep "^$name|" "$PEERS_FILE" || true)
@@ -424,7 +424,7 @@ cmd_router_new() {
   pub=$(printf '%s' "$priv" | wg pubkey)
   ip=$(next_ip) || { echo "no free address in $NET.0/$PREFIX"; exit 1; }
   if [ -n "$lan" ]; then
-    awk -F'|' -v l="$lan" '$4==l && $6=="router" {print "WARNING: LAN " l " already used by " $1}' "$PEERS_FILE"
+    awk -F'|' -v n="$name" -v l="$lan" '$1!=n && $4==l && $6=="router" {print "WARNING: LAN " l " already used by " $1 > "/dev/stderr"}' "$PEERS_FILE"
   fi
   add_peer "$name" "$pub" "$ip" "$lan" "" "router"
   srv_pub=$(cat "$SERVER_PUB_FILE")

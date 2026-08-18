@@ -417,14 +417,14 @@ class Handler(BaseHTTPRequestHandler):
             send_json(self, 400, {"status": "error", "message": "name and public_key are required"})
             return
         rc, out, err = run_wgman(["_register", name, pub, lan, ep])
-        out = out.strip()
+        lines = out.strip().splitlines()
         if rc != 0:
             send_json(self, 400, {"status": "error", "message": (err or out or "registration failed")})
             return
-        if not out.startswith("OK "):
+        if not lines or not lines[-1].startswith("OK "):
             send_json(self, 500, {"status": "error", "message": "unexpected server response"})
             return
-        ip = out[3:].strip()
+        ip = lines[-1][3:].strip()
         host = cfg.get("SERVER_HOST", "")
         port = cfg.get("PORT", "51820")
         endpoint = fmt_endpoint(host, port)

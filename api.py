@@ -75,14 +75,15 @@ class Handler(BaseHTTPRequestHandler):
         cmd = ["bash", os.path.join(WG_DIR, "wgman"), "_register", name, pub, lan, ep]
         res = subprocess.run(cmd, capture_output=True, text=True)
         out = (res.stdout or "").strip()
+        lines = out.splitlines()
         if res.returncode != 0:
             err = (res.stderr or res.stdout or "").strip()
             respond(self, 400, {"status": "error", "message": err or "registration failed"})
             return
-        if not out.startswith("OK "):
+        if not lines or not lines[-1].startswith("OK "):
             respond(self, 500, {"status": "error", "message": "unexpected server response"})
             return
-        ip = out[3:].strip()
+        ip = lines[-1][3:].strip()
 
         srv_pub = ""
         pubfile = "/etc/wireguard/server.pub"
