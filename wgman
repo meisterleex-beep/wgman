@@ -34,6 +34,7 @@ AWG_H3="8192"
 AWG_H4="16384"
 AWG_UP="/usr/local/bin/awg0-up.sh"
 AWG_DOWN="/usr/local/bin/awg0-down.sh"
+AWG_RUN="/usr/local/bin/awg0-run.sh"
 AWG_SERVICE="/etc/systemd/system/awg0.service"
 AWG_MODE="auto"
 
@@ -194,11 +195,51 @@ write_awg_down() {
   chmod +x "$AWG_DOWN"
 }
 
+write_awg_run() {
+  local server_key main_iface
+  server_key=$(cat "$SERVER_KEY_FILE")
+  main_iface=$(detect_main_iface)
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -e'
+    echo 'rm -f /var/run/amneziawg/awg0.sock 2>/dev/null || true'
+    echo 'ip link del awg0 2>/dev/null || true'
+    echo 'export WG_PROCESS_FOREGROUND=1'
+    echo 'export LOG_LEVEL=${LOG_LEVEL:-error}'
+    echo '/usr/local/bin/amneziawg-go -f awg0 &'
+    echo 'go_pid=$!'
+    echo 'cleanup() { kill "$go_pid" 2>/dev/null || true; ip link del awg0 2>/dev/null || true; }'
+    echo 'trap cleanup TERM INT EXIT'
+    echo 'for i in $(seq 1 30); do [ -S /var/run/amneziawg/awg0.sock ] && break; sleep 1; done'
+    echo '[ -S /var/run/amneziawg/awg0.sock ] || { echo "amneziawg-go failed to create UAPI socket"; exit 1; }'
+    echo "awg set awg0 listen-port $AWG_PORT private-key '$server_key' awg-jc $AWG_JC awg-jmin $AWG_JMIN awg-jmax $AWG_JMAX awg-s1 $AWG_S1 awg-s2 $AWG_S2 awg-h1 $AWG_H1 awg-h2 $AWG_H2 awg-h3 $AWG_H3 awg-h4 $AWG_H4"
+    while IFS='|' read -r pname ppub pip plan pep ptype _ proto _; do
+      [ -z "$pname" ] && continue
+      [ "$proto" = "awg" ] || continue
+      ai="$pip/32"
+      [ -n "$plan" ] && ai="$pip/32, $plan"
+      echo "awg set awg0 peer '$ppub' allowed-ips '$ai' persistent-keepalive 25"
+    done < "$PEERS_FILE"
+    echo "ip addr replace $AWG_NET.1/$AWG_PREFIX dev awg0 2>/dev/null || ip addr add $AWG_NET.1/$AWG_PREFIX dev awg0"
+    echo "ip link set dev awg0 up"
+    echo "iptables -C INPUT -p udp --dport $AWG_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $AWG_PORT -j ACCEPT"
+    echo "iptables -C INPUT -i awg0 -j ACCEPT 2>/dev/null || iptables -I INPUT -i awg0 -j ACCEPT"
+    echo "iptables -C FORWARD -i awg0 -o awg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -o awg0 -j ACCEPT"
+    echo "iptables -t nat -C POSTROUTING -s $AWG_NET.0/$AWG_PREFIX -o $main_iface -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s $AWG_NET.0/$AWG_PREFIX -o $main_iface -j MASQUERADE"
+    echo 'wait "$go_pid"'
+  } > "$AWG_RUN"
+  chmod +x "$AWG_RUN"
+}
+
 write_conf() {
   write_wg_conf
   if [ "${AWG:-0}" = "1" ]; then
-    write_awg_up
     write_awg_down
+    if [ "${AWG_MODE:-auto}" = "native" ]; then
+      write_awg_up
+    else
+      write_awg_run
+    fi
   fi
 }
 
@@ -447,9 +488,9 @@ ensure_awg_bins() {
 
 ensure_awg_service() {
   mkdir -p /etc/amneziawg
-  write_awg_up
   write_awg_down
   if [ "${AWG_MODE:-auto}" = "native" ]; then
+    write_awg_up
     cat > "$AWG_SERVICE" <<EOF
 [Unit]
 Description=AmneziaWG awg0 (kernel)
@@ -464,6 +505,7 @@ ExecStop=$AWG_DOWN
 WantedBy=multi-user.target
 EOF
   else
+    write_awg_run
     cat > "$AWG_SERVICE" <<EOF
 [Unit]
 Description=AmneziaWG awg0 (userspace)
@@ -471,11 +513,12 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/amneziawg-go -f awg0
-ExecStartPost=$AWG_UP
+ExecStart=$AWG_RUN
 ExecStopPost=$AWG_DOWN
 Restart=on-failure
 RestartSec=2
+StartLimitIntervalSec=10
+StartLimitBurst=10
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -503,6 +546,10 @@ cmd_awg() {
       else
         AWG_MODE=userspace
       fi
+      systemctl stop awg0.service 2>/dev/null || true
+      systemctl reset-failed awg0.service 2>/dev/null || true
+      ip link del awg0 2>/dev/null || true
+      rm -f /var/run/amneziawg/awg0.sock 2>/dev/null || true
       set_cfg AWG_MODE "$AWG_MODE"
       set_cfg AWG 1
       . "$CONFIG_FILE"
