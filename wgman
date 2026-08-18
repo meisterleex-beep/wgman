@@ -417,7 +417,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/amneziawg-go awg0
+ExecStart=/usr/local/bin/amneziawg-go -f awg0
 ExecStartPost=$AWG_UP
 ExecStopPost=$AWG_DOWN
 Restart=on-failure
