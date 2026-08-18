@@ -34,6 +34,7 @@ fi
 NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-32)
 
 echo "==> Router name: $NAME"
+echo "==> install-router.sh version: 2.1 (universal)"
 
 mask2bits() {
   local m=$1 bits=0 o oifs
@@ -148,25 +149,30 @@ EP_HOST=${EP_HOST%]}
 echo "==> Assigned WG IP: $WG_IP"
 echo "==> Applying OpenWrt configuration..."
 
-uci -q delete network.wg0
-uci -q delete network.wg0peer
+uci_run() {
+  echo "  ++ uci $*"
+  uci "$@" || { echo "ERROR: failed command: uci $*"; exit 1; }
+}
 
-uci set network.wg0=interface
-uci set network.wg0.proto=wireguard
-uci set network.wg0.private_key="$WG_PRIV"
-uci set network.wg0.listen_port=51820
-uci set network.wg0.mtu=1420
-uci set network.wg0.ipaddr="$WG_IP"
-uci set network.wg0.netmask=255.255.255.0
+uci -q delete network.wg0 2>/dev/null
+uci -q delete network.wg0peer 2>/dev/null
 
-uci set network.wg0peer=wireguard_peer
-uci set network.wg0peer.ifname=wg0
-uci set network.wg0peer.public_key="$SRV_PUB"
-uci set network.wg0peer.endpoint_host="$EP_HOST"
-uci set network.wg0peer.endpoint_port="$EP_PORT"
-uci set network.wg0peer.allowed_ips="$ALLOWED"
-uci set network.wg0peer.persistent_keepalive=25
-uci set network.wg0peer.route_allowed_ips=1
+uci_run uci set network.wg0=interface
+uci_run uci set network.wg0.proto=wireguard
+uci_run uci set network.wg0.private_key="$WG_PRIV"
+uci_run uci set network.wg0.listen_port=51820
+uci_run uci set network.wg0.mtu=1420
+uci_run uci set network.wg0.ipaddr="$WG_IP"
+uci_run uci set network.wg0.netmask=255.255.255.0
+
+uci_run uci set network.wg0peer=wireguard_peer
+uci_run uci set network.wg0peer.ifname=wg0
+uci_run uci set network.wg0peer.public_key="$SRV_PUB"
+uci_run uci set network.wg0peer.endpoint_host="$EP_HOST"
+uci_run uci set network.wg0peer.endpoint_port="$EP_PORT"
+uci_run uci set network.wg0peer.allowed_ips="$ALLOWED"
+uci_run uci set network.wg0peer.persistent_keepalive=25
+uci_run uci set network.wg0peer.route_allowed_ips=1
 
 LAN_ZONE=$(uci show firewall 2>/dev/null | grep "\.name='lan'" | sed "s/\.name.*//" | head -n1)
 if [ -z "$LAN_ZONE" ]; then
@@ -176,14 +182,14 @@ if [ -n "$LAN_ZONE" ]; then
   CUR=$(uci -q get firewall.$LAN_ZONE.network 2>/dev/null)
   case " $CUR " in
     *" wg0 "*) echo "==> wg0 already in lan zone" ;;
-    *) uci add_list firewall.$LAN_ZONE.network=wg0 ;;
+    *) uci_run uci add_list firewall.$LAN_ZONE.network=wg0 ;;
   esac
 else
   echo "WARNING: lan firewall zone not found, wg0 not added to it"
 fi
 
-uci commit network
-uci commit firewall
+uci_run uci commit network
+uci_run uci commit firewall
 
 /etc/init.d/network reload
 sleep 2
